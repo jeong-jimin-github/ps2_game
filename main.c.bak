@@ -1,0 +1,1959 @@
+#include <tamtypes.h>
+#include <malloc.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <gsKit.h>
+#include <dmaKit.h>
+#include <sifrpc.h>
+#include <loadfile.h>
+#include <libpad.h>
+#include <audsrv.h>
+#include <kernel.h>
+#include <sbv_patches.h>
+#include <debug.h>
+
+#define LOG(fmt, ...) printf("[DBG] " fmt "\n", ##__VA_ARGS__)
+
+#define SCREEN_W 640
+#define SCREEN_H 448
+
+#define TILE_SIZE 32
+#define MAX_LEVEL_WIDTH 128
+#define MAX_LEVEL_HEIGHT 32
+#define MAX_LEVELS 32
+#define MAX_PATH_LEN 128
+
+#define PLAYER_W 24.0f
+#define PLAYER_H 30.0f
+#define PLAYER_WALK_SPEED 2.3f
+#define PLAYER_RUN_SPEED 4.0f
+#define GRAVITY 0.28f
+#define MAX_FALL_SPEED 6.2f
+#define JUMP_VELOCITY -8.4f
+#define COYOTE_FRAMES 6
+#define JUMP_BUFFER_FRAMES 6
+
+#define SPRITE_MAGIC 0x58543250u /* 'P2TX' */
+#define PAK_MAGIC    0x4B505332u /* '2SPK' */
+#define PAK_NAME_LEN 32
+#define MAX_ANIM_FRAMES 16
+
+#define HURT_FRAMES 20
+#define CLEAR_FRAMES 50
+#define BGM_FILE_PATH "bgm.wav"
+#define BGM_STREAM_CHUNK 4096
+
+typedef enum {
+    PLAYER_ANIM_IDLE = 0,
+    PLAYER_ANIM_WALK,
+    PLAYER_ANIM_RUN,
+    PLAYER_ANIM_JUMP,
+    PLAYER_ANIM_CLEAR,
+    PLAYER_ANIM_DEAD,
+    PLAYER_ANIM_HURT,
+    PLAYER_ANIM_COUNT
+} PlayerAnimState;
+
+typedef struct {
+    u32 magic;
+    u16 width;
+    u16 height;
+    s16 offsetX;
+    s16 offsetY;
+} SpriteHeader;
+
+typedef struct {
+    int width;
+    int height;
+    char tiles[MAX_LEVEL_HEIGHT][MAX_LEVEL_WIDTH + 1];
+    float spawnX;
+    float spawnY;
+} Level;
+
+typedef struct {
+    float x;
+    float y;
+    float vx;
+    float vy;
+    int onGround;
+    int facingRight;
+    int coyoteTimer;
+    int jumpBufferTimer;
+} Player;
+
+typedef struct {
+    int count;
+    int current;
+    char paths[MAX_LEVELS][MAX_PATH_LEN];
+} LevelList;
+
+typedef struct {
+    GSTEXTURE player;
+    GSTEXTURE tileSolid;
+    GSTEXTURE tileTrap;
+    GSTEXTURE tileGoal;
+    GSTEXTURE background;
+    void *playerPixels;
+    void *tileSolidPixels;
+    void *tileTrapPixels;
+    void *tileGoalPixels;
+    void *backgroundPixels;
+    int hasPlayer;
+    int hasTileSolid;
+    int hasTileTrap;
+    int hasTileGoal;
+    int hasBackground;
+} GameTextures;
+
+typedef struct {
+    GSTEXTURE frames[MAX_ANIM_FRAMES];
+    void *pixels[MAX_ANIM_FRAMES];
+    s16 offsetX[MAX_ANIM_FRAMES];
+    s16 offsetY[MAX_ANIM_FRAMES];
+    int count;
+    int frameDelay;
+    int loop;
+} AnimationClip;
+
+typedef struct {
+    PlayerAnimState state;
+    int frame;
+    int tick;
+    PlayerAnimState pendingState;
+    int pendingTicks;
+    int groundedGrace;
+} PlayerAnimator;
+
+typedef struct {
+    unsigned char *pcmData;
+    int pcmSize;
+    int cursor;
+    audsrv_fmt_t format;
+    int audioReady;
+} BgmPlayer;
+
+typedef struct {
+    void *pixels;
+    u16 width;
+    u16 height;
+    s16 offsetX;
+    s16 offsetY;
+    int valid;
+} SpriteData;
+
+typedef struct {
+    SpriteData tileSolid;
+    SpriteData tileTrap;
+    SpriteData tileGoal;
+    SpriteData background;
+    SpriteData player;
+    SpriteData animFrames[PLAYER_ANIM_COUNT][MAX_ANIM_FRAMES];
+    int animFrameCount[PLAYER_ANIM_COUNT];
+    BgmPlayer bgm;
+} AssetBank;
+
+typedef struct {
+    char name[PAK_NAME_LEN];
+    u32 offset;
+    u32 size;
+} PakEntry;
+
+typedef struct {
+    PakEntry *entries;
+    unsigned char *dataSection;
+    int count;
+} SpritePack;
+
+static FILE *open_level_file(const char *path);
+
+static void make_cdrom_path(const char *src, char *dst, size_t dstSize)
+{
+    size_t o = 0;
+    size_t i;
+    const char prefix[] = "cdrom0:\\";
+
+    for (i = 0; prefix[i] != '\0' && o < dstSize - 1; i++) {
+        dst[o++] = prefix[i];
+    }
+
+    /* Convert to uppercase + backslash for ISO 9660 compatibility */
+    for (i = 0; src[i] != '\0' && o < dstSize - 3; i++) {
+        char c = src[i];
+        if (c == '/') {
+            c = '\\';
+        } else if (c >= 'a' && c <= 'z') {
+            c = (char)(c - 'a' + 'A');
+        }
+        dst[o++] = c;
+    }
+
+    if (o < dstSize - 2) {
+        dst[o++] = ';';
+        dst[o++] = '1';
+    }
+    dst[o] = '\0';
+}
+
+static void iop_delay(void)
+{
+    volatile int d;
+    for (d = 0; d < 500000; d++) { }
+}
+
+static void load_all_iop_modules(int *padOk, int *audioOk)
+{
+    int ret;
+    char cdPath[MAX_PATH_LEN + 32];
+
+    *padOk = 0;
+    *audioOk = 0;
+
+    SifLoadFileInit();
+
+    /* CD filesystem (already loaded by BIOS on CD boot, harmless if redundant) */
+    ret = SifLoadModule("rom0:CDVDMAN", 0, NULL);
+    LOG("CDVDMAN: %d", ret);
+    ret = SifLoadModule("rom0:CDVDFSV", 0, NULL);
+    LOG("CDVDFSV: %d", ret);
+
+    iop_delay();
+
+    /* Pad modules */
+    ret = SifLoadModule("rom0:XSIO2MAN", 0, NULL);
+    if (ret < 0) {
+        LOG("XSIO2MAN failed (%d), try SIO2MAN", ret);
+        ret = SifLoadModule("rom0:SIO2MAN", 0, NULL);
+    }
+    if (ret >= 0) {
+        int padRet = SifLoadModule("rom0:XPADMAN", 0, NULL);
+        if (padRet < 0) {
+            LOG("XPADMAN failed (%d), try PADMAN", padRet);
+            padRet = SifLoadModule("rom0:PADMAN", 0, NULL);
+        }
+        *padOk = (padRet >= 0) ? 1 : 0;
+    }
+    LOG("pad modules: %d", *padOk);
+
+    /* Audio modules */
+    *audioOk = 1;
+    ret = SifLoadModule("rom0:LIBSD", 0, NULL);
+    if (ret < 0) {
+        LOG("rom0:LIBSD failed (%d), trying freesd.irx", ret);
+        make_cdrom_path("freesd.irx", cdPath, sizeof(cdPath));
+        ret = SifLoadModule(cdPath, 0, NULL);
+        if (ret < 0) {
+            ret = SifLoadModule("host:freesd.irx", 0, NULL);
+            if (ret < 0) {
+                LOG("freesd.irx load failed (%d)", ret);
+                *audioOk = 0;
+            }
+        }
+    }
+
+    if (*audioOk) {
+        make_cdrom_path("audsrv.irx", cdPath, sizeof(cdPath));
+        ret = SifLoadModule(cdPath, 0, NULL);
+        if (ret < 0) {
+            ret = SifLoadModule("host:audsrv.irx", 0, NULL);
+            if (ret < 0) {
+                LOG("audsrv.irx load failed (%d)", ret);
+                *audioOk = 0;
+            }
+        }
+    }
+    LOG("audio modules: %d", *audioOk);
+
+    SifLoadFileExit();
+
+    /* Flush EE cache and wait for IOP to stabilize */
+    FlushCache(0);
+    iop_delay();
+    iop_delay();
+
+    LOG("all IOP modules loaded (pad=%d audio=%d)", *padOk, *audioOk);
+}
+
+static unsigned int read_u32_le(const unsigned char *p)
+{
+    return (unsigned int)p[0] |
+           ((unsigned int)p[1] << 8) |
+           ((unsigned int)p[2] << 16) |
+           ((unsigned int)p[3] << 24);
+}
+
+static unsigned short read_u16_le(const unsigned char *p)
+{
+    return (unsigned short)(p[0] | (p[1] << 8));
+}
+
+static FILE *open_binary_file(const char *path)
+{
+    FILE *fp;
+    char altPath[MAX_PATH_LEN + 32];
+    int attempt;
+
+    for (attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+            FlushCache(0);
+            iop_delay();
+            iop_delay();
+        }
+
+        /* Try cdrom uppercase path FIRST (most likely to work on real CD) */
+        if (strchr(path, ':') == NULL) {
+            make_cdrom_path(path, altPath, sizeof(altPath));
+            fp = fopen(altPath, "rb");
+            if (fp != NULL) {
+                return fp;
+            }
+        }
+
+        fp = fopen(path, "rb");
+        if (fp != NULL) {
+            return fp;
+        }
+
+        if (strchr(path, ':') == NULL) {
+            /* Try host: with flat name */
+            snprintf(altPath, sizeof(altPath), "host:%s", path);
+            fp = fopen(altPath, "rb");
+            if (fp != NULL) {
+                return fp;
+            }
+            /* Try host: with assets/ prefix (emulator compat) */
+            snprintf(altPath, sizeof(altPath), "host:assets/%s", path);
+            fp = fopen(altPath, "rb");
+            if (fp != NULL) {
+                return fp;
+            }
+        }
+    }
+
+    LOG("open failed: %s", path);
+    return NULL;
+}
+
+static int load_wav_pcm(const char *path, BgmPlayer *bgm)
+{
+    FILE *fp;
+    unsigned char riffHeader[12];
+    int fmtFound = 0;
+    int dataFound = 0;
+
+    fp = open_binary_file(path);
+    if (fp == NULL) {
+        LOG("bgm open failed: %s", path);
+        return 0;
+    }
+
+    if (fread(riffHeader, 1, sizeof(riffHeader), fp) != sizeof(riffHeader)) {
+        fclose(fp);
+        LOG("bgm header read failed");
+        return 0;
+    }
+
+    if (memcmp(riffHeader, "RIFF", 4) != 0 || memcmp(riffHeader + 8, "WAVE", 4) != 0) {
+        fclose(fp);
+        LOG("bgm is not RIFF/WAVE: %s", path);
+        return 0;
+    }
+
+    while (!dataFound) {
+        unsigned char chunkHeader[8];
+        unsigned int chunkSize;
+
+        if (fread(chunkHeader, 1, sizeof(chunkHeader), fp) != sizeof(chunkHeader)) {
+            break;
+        }
+
+        chunkSize = read_u32_le(chunkHeader + 4);
+
+        if (memcmp(chunkHeader, "fmt ", 4) == 0) {
+            unsigned char fmtBuf[40];
+            unsigned int readSize = chunkSize;
+            unsigned short audioFormat;
+            unsigned short channels;
+            unsigned int sampleRate;
+            unsigned short bitsPerSample;
+
+            if (readSize < 16) {
+                fclose(fp);
+                LOG("bgm fmt chunk too small");
+                return 0;
+            }
+            if (readSize > sizeof(fmtBuf)) {
+                readSize = sizeof(fmtBuf);
+            }
+            if (fread(fmtBuf, 1, readSize, fp) != readSize) {
+                fclose(fp);
+                LOG("bgm fmt read failed");
+                return 0;
+            }
+            if (chunkSize > readSize) {
+                fseek(fp, (long)(chunkSize - readSize), SEEK_CUR);
+            }
+
+            audioFormat = read_u16_le(fmtBuf + 0);
+            channels = read_u16_le(fmtBuf + 2);
+            sampleRate = read_u32_le(fmtBuf + 4);
+            bitsPerSample = read_u16_le(fmtBuf + 14);
+
+            if (audioFormat != 1 || (channels != 1 && channels != 2) ||
+                (bitsPerSample != 8 && bitsPerSample != 16)) {
+                fclose(fp);
+                LOG("bgm unsupported fmt: format=%u ch=%u bits=%u",
+                    (unsigned int)audioFormat,
+                    (unsigned int)channels,
+                    (unsigned int)bitsPerSample);
+                return 0;
+            }
+
+            bgm->format.freq = (int)sampleRate;
+            bgm->format.bits = (int)bitsPerSample;
+            bgm->format.channels = (int)channels;
+            fmtFound = 1;
+        } else if (memcmp(chunkHeader, "data", 4) == 0) {
+            if (chunkSize == 0) {
+                fclose(fp);
+                LOG("bgm data chunk is empty");
+                return 0;
+            }
+
+            bgm->pcmData = (unsigned char *)memalign(64, chunkSize);
+            if (bgm->pcmData == NULL) {
+                fclose(fp);
+                LOG("bgm data alloc failed");
+                return 0;
+            }
+
+            if (fread(bgm->pcmData, 1, chunkSize, fp) != chunkSize) {
+                fclose(fp);
+                free(bgm->pcmData);
+                bgm->pcmData = NULL;
+                LOG("bgm data read failed");
+                return 0;
+            }
+
+            bgm->pcmSize = (int)chunkSize;
+            dataFound = 1;
+        } else {
+            fseek(fp, (long)chunkSize, SEEK_CUR);
+        }
+
+        if (chunkSize & 1u) {
+            fseek(fp, 1L, SEEK_CUR);
+        }
+    }
+
+    fclose(fp);
+
+    if (!fmtFound || !dataFound) {
+        if (bgm->pcmData != NULL) {
+            free(bgm->pcmData);
+            bgm->pcmData = NULL;
+        }
+        bgm->pcmSize = 0;
+        LOG("bgm missing fmt/data chunk");
+        return 0;
+    }
+
+    /* Convert 8-bit unsigned PCM to 16-bit signed PCM for SPU2 compatibility */
+    if (bgm->format.bits == 8 && bgm->pcmData != NULL && bgm->pcmSize > 0) {
+        int newSize = bgm->pcmSize * 2;
+        unsigned char *src = bgm->pcmData;
+        short *dst;
+        int i;
+
+        dst = (short *)memalign(64, (size_t)newSize);
+        if (dst == NULL) {
+            free(bgm->pcmData);
+            bgm->pcmData = NULL;
+            bgm->pcmSize = 0;
+            LOG("bgm 8->16 bit alloc failed");
+            return 0;
+        }
+
+        for (i = 0; i < bgm->pcmSize; i++) {
+            dst[i] = (short)(((int)src[i] - 128) << 8);
+        }
+
+        free(bgm->pcmData);
+        bgm->pcmData = (unsigned char *)dst;
+        bgm->pcmSize = newSize;
+        bgm->format.bits = 16;
+        LOG("bgm converted 8-bit -> 16-bit (%d bytes)", newSize);
+    }
+
+    LOG("bgm loaded: %s (rate=%d ch=%d bits=%d size=%d)",
+        path, bgm->format.freq, bgm->format.channels, bgm->format.bits, bgm->pcmSize);
+    return 1;
+}
+
+/* Audio modules now loaded by load_all_iop_modules() */
+
+static int init_bgm_player(BgmPlayer *bgm, const char *path, int audioOk)
+{
+    memset(bgm, 0, sizeof(*bgm));
+
+    if (!load_wav_pcm(path, bgm)) {
+        return 0;
+    }
+
+    if (!audioOk) {
+        LOG("audio IOP modules not available, skipping BGM");
+        free(bgm->pcmData);
+        memset(bgm, 0, sizeof(*bgm));
+        return 0;
+    }
+
+    if (audsrv_init() != 0) {
+        LOG("audsrv_init failed: %s", audsrv_get_error_string());
+        free(bgm->pcmData);
+        memset(bgm, 0, sizeof(*bgm));
+        return 0;
+    }
+
+    LOG("bgm wav format: rate=%d ch=%d bits=%d",
+        bgm->format.freq, bgm->format.channels, bgm->format.bits);
+
+    /* IOP needs a moment after init before accepting format changes */
+    {
+        int retry;
+        int fmtOk = 0;
+        for (retry = 0; retry < 50; retry++) {
+            volatile int delay;
+            for (delay = 0; delay < 100000; delay++) { }
+            if (audsrv_set_format(&bgm->format) == 0) {
+                fmtOk = 1;
+                break;
+            }
+        }
+        if (!fmtOk) {
+            LOG("audsrv_set_format failed after retries: %s", audsrv_get_error_string());
+            audsrv_quit();
+            free(bgm->pcmData);
+            memset(bgm, 0, sizeof(*bgm));
+            return 0;
+        }
+        LOG("audsrv_set_format ok (attempt %d)", retry + 1);
+    }
+
+    audsrv_set_volume(80);
+    bgm->audioReady = 1;
+    bgm->cursor = 0;
+    return 1;
+}
+
+static void update_bgm_stream(BgmPlayer *bgm)
+{
+    int available;
+
+    if (!bgm->audioReady || bgm->pcmData == NULL || bgm->pcmSize <= 0) {
+        return;
+    }
+
+    available = audsrv_available();
+    while (available > 0) {
+        int remain = bgm->pcmSize - bgm->cursor;
+        int toSend = remain;
+        int sent;
+
+        if (toSend > available) {
+            toSend = available;
+        }
+        if (toSend > BGM_STREAM_CHUNK) {
+            toSend = BGM_STREAM_CHUNK;
+        }
+
+        if (toSend <= 0) {
+            bgm->cursor = 0;
+            remain = bgm->pcmSize;
+            toSend = remain;
+            if (toSend > available) {
+                toSend = available;
+            }
+            if (toSend > BGM_STREAM_CHUNK) {
+                toSend = BGM_STREAM_CHUNK;
+            }
+            if (toSend <= 0) {
+                break;
+            }
+        }
+
+        sent = audsrv_play_audio((const char *)bgm->pcmData + bgm->cursor, toSend);
+        if (sent <= 0) {
+            break;
+        }
+
+        bgm->cursor += sent;
+        if (bgm->cursor >= bgm->pcmSize) {
+            bgm->cursor = 0;
+        }
+
+        available -= sent;
+    }
+}
+
+static void shutdown_bgm_player(BgmPlayer *bgm)
+{
+    if (bgm->audioReady) {
+        audsrv_stop_audio();
+        audsrv_quit();
+    }
+
+    if (bgm->pcmData != NULL) {
+        free(bgm->pcmData);
+    }
+
+    memset(bgm, 0, sizeof(*bgm));
+}
+
+/* Pad modules now loaded by load_all_iop_modules() */
+
+static void trim_line(char *s)
+{
+    size_t len = strlen(s);
+    while (len > 0 && (s[len - 1] == '\n' || s[len - 1] == '\r' || s[len - 1] == ' ' || s[len - 1] == '\t')) {
+        s[len - 1] = '\0';
+        len--;
+    }
+}
+
+static FILE *open_level_file(const char *path)
+{
+    FILE *fp;
+    char altPath[MAX_PATH_LEN + 32];
+    int attempt;
+
+    for (attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+            FlushCache(0);
+            iop_delay();
+            iop_delay();
+        }
+
+        /* Try cdrom uppercase path FIRST (most likely to work on real CD) */
+        if (strchr(path, ':') == NULL) {
+            make_cdrom_path(path, altPath, sizeof(altPath));
+            fp = fopen(altPath, "rb");
+            if (fp != NULL) {
+                return fp;
+            }
+        }
+
+        fp = fopen(path, "rb");
+        if (fp != NULL) {
+            return fp;
+        }
+
+        if (strchr(path, ':') == NULL) {
+            /* Try host: with flat name */
+            snprintf(altPath, sizeof(altPath), "host:%s", path);
+            fp = fopen(altPath, "rb");
+            if (fp != NULL) {
+                return fp;
+            }
+            /* Try host: with assets/ prefix (emulator compat) */
+            snprintf(altPath, sizeof(altPath), "host:assets/%s", path);
+            fp = fopen(altPath, "rb");
+            if (fp != NULL) {
+                return fp;
+            }
+            /* Try host: with levels/ prefix (emulator compat) */
+            snprintf(altPath, sizeof(altPath), "host:levels/%s", path);
+            fp = fopen(altPath, "rb");
+            if (fp != NULL) {
+                return fp;
+            }
+        }
+    }
+
+    LOG("open failed: %s", path);
+    return NULL;
+}
+
+static int read_sprite_data(const char *path, SpriteData *sd)
+{
+    FILE *fp;
+    SpriteHeader header;
+    size_t pixelBytes;
+    void *pixels;
+
+    memset(sd, 0, sizeof(*sd));
+
+    fp = open_level_file(path);
+    if (fp == NULL) {
+        LOG("sprite open failed: %s", path);
+        return 0;
+    }
+
+    if (fread(&header, 1, sizeof(header), fp) != sizeof(header)) {
+        fclose(fp);
+        LOG("sprite header read failed: %s", path);
+        return 0;
+    }
+
+    if (header.magic != SPRITE_MAGIC || header.width == 0 || header.height == 0) {
+        fclose(fp);
+        LOG("sprite header invalid: %s", path);
+        return 0;
+    }
+
+    pixelBytes = (size_t)header.width * (size_t)header.height * 4u;
+    pixels = memalign(128, pixelBytes);
+    if (pixels == NULL) {
+        fclose(fp);
+        LOG("sprite mem alloc failed: %s", path);
+        return 0;
+    }
+
+    if (fread(pixels, 1, pixelBytes, fp) != pixelBytes) {
+        fclose(fp);
+        free(pixels);
+        LOG("sprite pixel read failed: %s", path);
+        return 0;
+    }
+
+    fclose(fp);
+
+    /* Pre-process alpha: clear RGB on fully transparent pixels */
+    {
+        unsigned char *px = (unsigned char *)pixels;
+        size_t total = (size_t)header.width * (size_t)header.height;
+        size_t pi;
+        for (pi = 0; pi < total; pi++) {
+            if (px[pi * 4 + 3] == 0) {
+                px[pi * 4 + 0] = 0;
+                px[pi * 4 + 1] = 0;
+                px[pi * 4 + 2] = 0;
+            }
+        }
+    }
+
+    sd->pixels = pixels;
+    sd->width = header.width;
+    sd->height = header.height;
+    sd->offsetX = header.offsetX;
+    sd->offsetY = header.offsetY;
+    sd->valid = 1;
+
+    /* Let the IOP CD driver release its handle before the next open */
+    FlushCache(0);
+    iop_delay();
+
+    LOG("sprite read: %s (%ux%u)", path, (unsigned)header.width, (unsigned)header.height);
+    return 1;
+}
+
+static void upload_sprite_to_vram(GSGLOBAL *gsGlobal, const SpriteData *sd, GSTEXTURE *tex, void **pixelMem, s16 *outOffsetX, s16 *outOffsetY)
+{
+    memset(tex, 0, sizeof(*tex));
+    tex->Width = sd->width;
+    tex->Height = sd->height;
+    tex->PSM = GS_PSM_CT32;
+    tex->Filter = GS_FILTER_NEAREST;
+    tex->Mem = sd->pixels;
+
+    FlushCache(0);
+
+    tex->Vram = gsKit_vram_alloc(gsGlobal,
+                                 gsKit_texture_size(tex->Width, tex->Height, tex->PSM),
+                                 GSKIT_ALLOC_USERBUFFER);
+    gsKit_texture_upload(gsGlobal, tex);
+
+    FlushCache(0);
+
+    *pixelMem = sd->pixels;
+    if (outOffsetX) *outOffsetX = sd->offsetX;
+    if (outOffsetY) *outOffsetY = sd->offsetY;
+}
+
+/* ---- Two-phase asset loading: CD → RAM, then RAM → VRAM ---- */
+
+static int read_anim_clip_data(const char *baseName, SpriteData frames[], int maxFrames)
+{
+    int i, loaded = 0;
+    char path[256];
+
+    for (i = 0; i < maxFrames; i++) {
+        snprintf(path, sizeof(path), "%s_%02d.ps2tex", baseName, i);
+        if (!read_sprite_data(path, &frames[i])) {
+            break;
+        }
+        loaded++;
+
+        /* Phantom-read detection: real PS2 CDVDFSV may reuse stale handles
+           for non-existent files, returning duplicate data. Stop if the
+           pixel content is identical to the previous frame. */
+        if (loaded >= 2 && frames[i].width == frames[i - 1].width
+                        && frames[i].height == frames[i - 1].height) {
+            size_t sz = (size_t)frames[i].width * (size_t)frames[i].height * 4u;
+            if (memcmp(frames[i].pixels, frames[i - 1].pixels, sz) == 0) {
+                LOG("phantom read detected at %s (dup of prev), stopping", path);
+                free(frames[i].pixels);
+                memset(&frames[i], 0, sizeof(frames[i]));
+                loaded--;
+                break;
+            }
+        }
+    }
+
+    if (loaded == 0) {
+        snprintf(path, sizeof(path), "%s.ps2tex", baseName);
+        if (read_sprite_data(path, &frames[0])) {
+            loaded = 1;
+        }
+    }
+
+    return loaded;
+}
+
+/* ---- Sprite pack (SPRITES.PAK) loading ---- */
+
+static int load_spritepack(const char *path, SpritePack *pack)
+{
+    FILE *fp;
+    u32 header[2];
+    u32 dataSize;
+    size_t indexSize;
+    int i;
+
+    memset(pack, 0, sizeof(*pack));
+
+    fp = open_binary_file(path);
+    if (fp == NULL) {
+        LOG("pak open failed: %s", path);
+        return 0;
+    }
+
+    if (fread(header, 4, 2, fp) != 2) {
+        fclose(fp);
+        LOG("pak header read failed");
+        return 0;
+    }
+
+    if (header[0] != PAK_MAGIC) {
+        fclose(fp);
+        LOG("pak magic mismatch: 0x%08X", (unsigned)header[0]);
+        return 0;
+    }
+
+    pack->count = (int)header[1];
+    if (pack->count <= 0 || pack->count > 256) {
+        fclose(fp);
+        LOG("pak invalid count: %d", pack->count);
+        return 0;
+    }
+
+    indexSize = (size_t)pack->count * sizeof(PakEntry);
+    pack->entries = (PakEntry *)memalign(64, indexSize);
+    if (pack->entries == NULL) {
+        fclose(fp);
+        LOG("pak index alloc failed");
+        return 0;
+    }
+
+    if (fread(pack->entries, 1, indexSize, fp) != indexSize) {
+        fclose(fp);
+        free(pack->entries);
+        pack->entries = NULL;
+        LOG("pak index read failed");
+        return 0;
+    }
+
+    dataSize = 0;
+    for (i = 0; i < pack->count; i++) {
+        u32 end = pack->entries[i].offset + pack->entries[i].size;
+        if (end > dataSize) dataSize = end;
+    }
+
+    pack->dataSection = (unsigned char *)memalign(128, dataSize);
+    if (pack->dataSection == NULL) {
+        fclose(fp);
+        free(pack->entries);
+        pack->entries = NULL;
+        LOG("pak data alloc failed (%u bytes)", (unsigned)dataSize);
+        return 0;
+    }
+
+    FlushCache(0);
+
+    if (fread(pack->dataSection, 1, dataSize, fp) != dataSize) {
+        LOG("pak data read partial (%u bytes requested)", (unsigned)dataSize);
+    }
+
+    fclose(fp);
+    FlushCache(0);
+
+    LOG("pak loaded: %d entries, %u bytes data", pack->count, (unsigned)dataSize);
+    return 1;
+}
+
+static unsigned char *find_in_pack(const SpritePack *pack, const char *name, u32 *outSize)
+{
+    int i;
+    for (i = 0; i < pack->count; i++) {
+        const char *a = pack->entries[i].name;
+        const char *b = name;
+        int match = 1;
+        while (*a && *b) {
+            char ca = (*a >= 'a' && *a <= 'z') ? (char)(*a - 32) : *a;
+            char cb = (*b >= 'a' && *b <= 'z') ? (char)(*b - 32) : *b;
+            if (ca != cb) { match = 0; break; }
+            a++; b++;
+        }
+        if (match && *a == *b) {
+            *outSize = pack->entries[i].size;
+            return pack->dataSection + pack->entries[i].offset;
+        }
+    }
+    return NULL;
+}
+
+static int read_sprite_from_pack(const SpritePack *pack, const char *name, SpriteData *sd)
+{
+    u32 blobSize;
+    unsigned char *blob;
+    SpriteHeader header;
+    size_t pixelBytes;
+    void *pixels;
+
+    memset(sd, 0, sizeof(*sd));
+
+    blob = find_in_pack(pack, name, &blobSize);
+    if (blob == NULL) return 0;
+
+    if (blobSize < sizeof(SpriteHeader)) {
+        LOG("pak entry too small: %s (%u)", name, (unsigned)blobSize);
+        return 0;
+    }
+
+    memcpy(&header, blob, sizeof(header));
+    if (header.magic != SPRITE_MAGIC || header.width == 0 || header.height == 0) {
+        LOG("pak entry bad header: %s (magic=0x%08X)", name, (unsigned)header.magic);
+        return 0;
+    }
+
+    pixelBytes = (size_t)header.width * (size_t)header.height * 4u;
+    if (blobSize < sizeof(SpriteHeader) + pixelBytes) {
+        LOG("pak entry truncated: %s", name);
+        return 0;
+    }
+
+    pixels = memalign(128, pixelBytes);
+    if (pixels == NULL) {
+        LOG("pak sprite alloc failed: %s", name);
+        return 0;
+    }
+
+    memcpy(pixels, blob + sizeof(SpriteHeader), pixelBytes);
+
+    {
+        unsigned char *px = (unsigned char *)pixels;
+        size_t total = (size_t)header.width * (size_t)header.height;
+        size_t pi;
+        for (pi = 0; pi < total; pi++) {
+            if (px[pi * 4 + 3] == 0) {
+                px[pi * 4 + 0] = 0;
+                px[pi * 4 + 1] = 0;
+                px[pi * 4 + 2] = 0;
+            }
+        }
+    }
+
+    sd->pixels = pixels;
+    sd->width = header.width;
+    sd->height = header.height;
+    sd->offsetX = header.offsetX;
+    sd->offsetY = header.offsetY;
+    sd->valid = 1;
+
+    LOG("pak sprite: %s (%ux%u)", name, (unsigned)header.width, (unsigned)header.height);
+    return 1;
+}
+
+static void free_spritepack(SpritePack *pack)
+{
+    if (pack->entries) { free(pack->entries); }
+    if (pack->dataSection) { free(pack->dataSection); }
+    memset(pack, 0, sizeof(*pack));
+}
+
+static void loading_msg(int step, int total, const char *name)
+{
+    scr_printf("[%2d/%2d] Loading %s ...\n", step, total, name);
+}
+
+static void load_all_assets_from_cd(AssetBank *bank)
+{
+    SpritePack pack;
+    int step = 0;
+    const int totalSteps = 12;
+    static const char *animNames[PLAYER_ANIM_COUNT] = {
+        "player_idle", "player_walk", "player_run", "player_jump",
+        "player_clear", "player_dead", "player_hurt"
+    };
+    int a;
+
+    memset(bank, 0, sizeof(*bank));
+
+    init_scr();
+    scr_printf("=== PS2 Platformer - Loading ===\n\n");
+
+    /* Load the single sprite pack file from CD */
+    scr_printf("Opening SPRITES.PAK ...\n");
+    if (!load_spritepack("sprites.pak", &pack)) {
+        scr_printf("  SPRITES.PAK FAILED! Trying individual files...\n\n");
+
+        /* Fallback to individual file loading for emulator/host: testing */
+        loading_msg(++step, totalSteps, "tile_solid");
+        if (!read_sprite_data("tile_solid.ps2tex", &bank->tileSolid))
+            read_sprite_data("tile_soild.ps2tex", &bank->tileSolid);
+        scr_printf("  -> %s\n", bank->tileSolid.valid ? "OK" : "MISSING");
+
+        loading_msg(++step, totalSteps, "tile_trap");
+        read_sprite_data("tile_trap.ps2tex", &bank->tileTrap);
+        scr_printf("  -> %s\n", bank->tileTrap.valid ? "OK" : "MISSING");
+
+        loading_msg(++step, totalSteps, "tile_goal");
+        read_sprite_data("tile_goal.ps2tex", &bank->tileGoal);
+        scr_printf("  -> %s\n", bank->tileGoal.valid ? "OK" : "MISSING");
+
+        loading_msg(++step, totalSteps, "background");
+        read_sprite_data("bg.ps2tex", &bank->background);
+        scr_printf("  -> %s\n", bank->background.valid ? "OK" : "MISSING");
+
+        loading_msg(++step, totalSteps, "player");
+        read_sprite_data("player.ps2tex", &bank->player);
+        scr_printf("  -> %s\n", bank->player.valid ? "OK" : "MISSING");
+
+        for (a = 0; a < PLAYER_ANIM_COUNT; a++) {
+            loading_msg(++step, totalSteps, animNames[a]);
+            bank->animFrameCount[a] = read_anim_clip_data(animNames[a], bank->animFrames[a], MAX_ANIM_FRAMES);
+            scr_printf("  -> %d frames\n", bank->animFrameCount[a]);
+        }
+
+        scr_printf("\nAll assets read to RAM. Initializing video...\n");
+        return;
+    }
+
+    scr_printf("  -> %d sprites in pack\n\n", pack.count);
+
+    /* --- tiles from pack --- */
+    loading_msg(++step, totalSteps, "tile_solid");
+    if (!read_sprite_from_pack(&pack, "TILE_SOLID.PS2TEX", &bank->tileSolid))
+        read_sprite_from_pack(&pack, "TILE_SOILD.PS2TEX", &bank->tileSolid);
+    scr_printf("  -> %s\n", bank->tileSolid.valid ? "OK" : "MISSING");
+
+    loading_msg(++step, totalSteps, "tile_trap");
+    read_sprite_from_pack(&pack, "TILE_TRAP.PS2TEX", &bank->tileTrap);
+    scr_printf("  -> %s\n", bank->tileTrap.valid ? "OK" : "MISSING");
+
+    loading_msg(++step, totalSteps, "tile_goal");
+    read_sprite_from_pack(&pack, "TILE_GOAL.PS2TEX", &bank->tileGoal);
+    scr_printf("  -> %s\n", bank->tileGoal.valid ? "OK" : "MISSING");
+
+    /* --- background from pack --- */
+    loading_msg(++step, totalSteps, "background");
+    read_sprite_from_pack(&pack, "BG.PS2TEX", &bank->background);
+    scr_printf("  -> %s\n", bank->background.valid ? "OK" : "MISSING");
+
+    /* --- player fallback sprite from pack --- */
+    loading_msg(++step, totalSteps, "player");
+    read_sprite_from_pack(&pack, "PLAYER.PS2TEX", &bank->player);
+    scr_printf("  -> %s\n", bank->player.valid ? "OK" : "n/a");
+
+    /* --- animation clips from pack --- */
+    for (a = 0; a < PLAYER_ANIM_COUNT; a++) {
+        char name[64];
+        int i, loaded = 0;
+        loading_msg(++step, totalSteps, animNames[a]);
+        for (i = 0; i < MAX_ANIM_FRAMES; i++) {
+            snprintf(name, sizeof(name), "%s_%02d.ps2tex", animNames[a], i);
+            if (!read_sprite_from_pack(&pack, name, &bank->animFrames[a][i]))
+                break;
+            loaded++;
+        }
+        if (loaded == 0) {
+            snprintf(name, sizeof(name), "%s.ps2tex", animNames[a]);
+            if (read_sprite_from_pack(&pack, name, &bank->animFrames[a][0]))
+                loaded = 1;
+        }
+        bank->animFrameCount[a] = loaded;
+        scr_printf("  -> %d frames\n", loaded);
+    }
+
+    free_spritepack(&pack);
+    scr_printf("\nAll assets read to RAM. Initializing video...\n");
+}
+
+static void upload_all_assets_to_vram(GSGLOBAL *gsGlobal, const AssetBank *bank, GameTextures *tex, AnimationClip playerAnims[PLAYER_ANIM_COUNT])
+{
+    static const int animDelays[PLAYER_ANIM_COUNT] = { 12, 7, 5, 6, 6, 8, 6 };
+    static const int animLoops[PLAYER_ANIM_COUNT]  = {  1, 1, 1, 0, 1, 0, 0 };
+    int a, f;
+
+    memset(tex, 0, sizeof(*tex));
+
+    /* --- tile solid --- */
+    if (bank->tileSolid.valid) {
+        upload_sprite_to_vram(gsGlobal, &bank->tileSolid, &tex->tileSolid, &tex->tileSolidPixels, NULL, NULL);
+        tex->hasTileSolid = 1;
+    }
+    /* --- tile trap --- */
+    if (bank->tileTrap.valid) {
+        upload_sprite_to_vram(gsGlobal, &bank->tileTrap, &tex->tileTrap, &tex->tileTrapPixels, NULL, NULL);
+        tex->hasTileTrap = 1;
+    }
+    /* --- tile goal --- */
+    if (bank->tileGoal.valid) {
+        upload_sprite_to_vram(gsGlobal, &bank->tileGoal, &tex->tileGoal, &tex->tileGoalPixels, NULL, NULL);
+        tex->hasTileGoal = 1;
+    }
+    /* --- background --- */
+    if (bank->background.valid) {
+        upload_sprite_to_vram(gsGlobal, &bank->background, &tex->background, &tex->backgroundPixels, NULL, NULL);
+        tex->hasBackground = 1;
+    }
+    /* --- player sprite --- */
+    if (bank->player.valid) {
+        upload_sprite_to_vram(gsGlobal, &bank->player, &tex->player, &tex->playerPixels, NULL, NULL);
+        tex->hasPlayer = 1;
+    }
+
+    /* --- animation clips --- */
+    for (a = 0; a < PLAYER_ANIM_COUNT; a++) {
+        memset(&playerAnims[a], 0, sizeof(playerAnims[a]));
+        playerAnims[a].frameDelay = animDelays[a];
+        playerAnims[a].loop = animLoops[a];
+        playerAnims[a].count = bank->animFrameCount[a];
+        for (f = 0; f < bank->animFrameCount[a]; f++) {
+            upload_sprite_to_vram(gsGlobal, &bank->animFrames[a][f],
+                                  &playerAnims[a].frames[f],
+                                  &playerAnims[a].pixels[f],
+                                  &playerAnims[a].offsetX[f],
+                                  &playerAnims[a].offsetY[f]);
+        }
+    }
+
+    LOG("all assets uploaded to VRAM");
+}
+
+static AnimationClip *get_player_clip_safe(AnimationClip clips[PLAYER_ANIM_COUNT], PlayerAnimState state)
+{
+    int i;
+    AnimationClip *clip = &clips[(int)state];
+    if (clip->count > 0) {
+        return clip;
+    }
+
+    clip = &clips[(int)PLAYER_ANIM_IDLE];
+    if (clip->count > 0) {
+        return clip;
+    }
+
+    for (i = 0; i < PLAYER_ANIM_COUNT; i++) {
+        if (clips[i].count > 0) {
+            return &clips[i];
+        }
+    }
+
+    return NULL;
+}
+
+static void animator_init(PlayerAnimator *anim)
+{
+    memset(anim, 0, sizeof(*anim));
+    anim->state = PLAYER_ANIM_IDLE;
+    anim->pendingState = PLAYER_ANIM_IDLE;
+}
+
+static PlayerAnimState pick_player_anim_state(const Player *p,
+                                              unsigned int padData,
+                                              int gameOver,
+                                              int hurtTimer,
+                                              int clearTimer,
+                                              int *groundedGrace)
+{
+    int left = (padData & PAD_LEFT) != 0;
+    int right = (padData & PAD_RIGHT) != 0;
+    int moveInput = (left ^ right);
+    int runInput = moveInput && ((padData & PAD_CROSS) != 0);
+
+    if (p->onGround) {
+        *groundedGrace = 3;
+    } else if (*groundedGrace > 0) {
+        (*groundedGrace)--;
+    }
+
+    if (gameOver) {
+        return PLAYER_ANIM_DEAD;
+    }
+    if (hurtTimer > 0) {
+        return PLAYER_ANIM_HURT;
+    }
+    if (clearTimer > 0) {
+        return PLAYER_ANIM_CLEAR;
+    }
+
+    if (!p->onGround && *groundedGrace == 0) {
+        return PLAYER_ANIM_JUMP;
+    }
+    if (runInput) {
+        return PLAYER_ANIM_RUN;
+    }
+    if (moveInput) {
+        return PLAYER_ANIM_WALK;
+    }
+    return PLAYER_ANIM_IDLE;
+}
+
+static void animator_step(PlayerAnimator *anim,
+                          AnimationClip clips[PLAYER_ANIM_COUNT],
+                          const Player *p,
+                          unsigned int padData,
+                          int gameOver,
+                          int hurtTimer,
+                          int clearTimer)
+{
+    PlayerAnimState candidate = pick_player_anim_state(p, padData, gameOver, hurtTimer, clearTimer, &anim->groundedGrace);
+    int requiredStable = (candidate == PLAYER_ANIM_JUMP || candidate == PLAYER_ANIM_HURT ||
+                          candidate == PLAYER_ANIM_DEAD || candidate == PLAYER_ANIM_CLEAR)
+                             ? 1
+                             : 3;
+
+    if (candidate != anim->state) {
+        if (anim->pendingState != candidate) {
+            anim->pendingState = candidate;
+            anim->pendingTicks = 1;
+        } else {
+            anim->pendingTicks++;
+        }
+
+        if (anim->pendingTicks >= requiredStable) {
+            anim->state = candidate;
+            anim->frame = 0;
+            anim->tick = 0;
+            anim->pendingTicks = 0;
+        }
+    } else {
+        anim->pendingState = candidate;
+        anim->pendingTicks = 0;
+    }
+
+    {
+        AnimationClip *clip = get_player_clip_safe(clips, anim->state);
+        int frameDelay = 1;
+        if (clip == NULL || clip->count <= 0) {
+            return;
+        }
+
+        if (clip->frameDelay > 0) {
+            frameDelay = clip->frameDelay;
+        }
+
+        anim->tick++;
+        if (anim->tick >= frameDelay) {
+            anim->tick = 0;
+            if (clip->loop) {
+                anim->frame = (anim->frame + 1) % clip->count;
+            } else if (anim->frame < clip->count - 1) {
+                anim->frame++;
+            }
+        }
+    }
+}
+
+static int parse_level_file(const char *path, Level *level)
+{
+    FILE *fp;
+    char line[512];
+    int row = 0;
+    int inMap = 0;
+
+    fp = open_level_file(path);
+    if (fp == NULL) {
+        LOG("level open failed: %s", path);
+        return 0;
+    }
+
+    memset(level, 0, sizeof(*level));
+    level->width = 0;
+    level->height = 0;
+    level->spawnX = 2.0f * TILE_SIZE;
+    level->spawnY = 2.0f * TILE_SIZE;
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        trim_line(line);
+        if (line[0] == '\0' || line[0] == ';') {
+            continue;
+        }
+
+        if (!inMap) {
+            if (strncmp(line, "width=", 6) == 0) {
+                level->width = atoi(line + 6);
+                continue;
+            }
+            if (strncmp(line, "height=", 7) == 0) {
+                level->height = atoi(line + 7);
+                continue;
+            }
+            if (strncmp(line, "spawn=", 6) == 0) {
+                int sx = 2;
+                int sy = 2;
+                sscanf(line + 6, "%d,%d", &sx, &sy);
+                level->spawnX = (float)(sx * TILE_SIZE);
+                level->spawnY = (float)(sy * TILE_SIZE);
+                continue;
+            }
+            if (strcmp(line, "data:") == 0) {
+                inMap = 1;
+                continue;
+            }
+            continue;
+        }
+
+        if (row >= MAX_LEVEL_HEIGHT) {
+            break;
+        }
+
+        strncpy(level->tiles[row], line, MAX_LEVEL_WIDTH);
+        level->tiles[row][MAX_LEVEL_WIDTH] = '\0';
+
+        if ((int)strlen(level->tiles[row]) > level->width) {
+            level->width = (int)strlen(level->tiles[row]);
+        }
+
+        row++;
+    }
+
+    fclose(fp);
+
+    if (row > 0) {
+        level->height = row;
+    }
+
+    if (level->width <= 0 || level->height <= 0) {
+        LOG("invalid level: %s", path);
+        return 0;
+    }
+
+    LOG("level loaded: %s (%dx%d)", path, level->width, level->height);
+    return 1;
+}
+
+static int load_level_list(const char *path, LevelList *list)
+{
+    FILE *fp;
+    char line[512];
+
+    memset(list, 0, sizeof(*list));
+    fp = open_level_file(path);
+
+    if (fp == NULL) {
+        LOG("level list open failed: %s", path);
+        strncpy(list->paths[0], "level1.txt", MAX_PATH_LEN - 1);
+        list->paths[0][MAX_PATH_LEN - 1] = '\0';
+        list->count = 1;
+        return 1;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL && list->count < MAX_LEVELS) {
+        trim_line(line);
+        if (line[0] == '\0' || line[0] == ';') {
+            continue;
+        }
+        strncpy(list->paths[list->count], line, MAX_PATH_LEN - 1);
+        list->paths[list->count][MAX_PATH_LEN - 1] = '\0';
+        list->count++;
+    }
+
+    fclose(fp);
+
+    if (list->count <= 0) {
+        strncpy(list->paths[0], "level1.txt", MAX_PATH_LEN - 1);
+        list->paths[0][MAX_PATH_LEN - 1] = '\0';
+        list->count = 1;
+    }
+
+    LOG("level list loaded: %d levels", list->count);
+    return 1;
+}
+
+static char tile_at(const Level *level, int tx, int ty)
+{
+    if (tx < 0 || tx >= level->width || ty < 0) {
+        return '#';
+    }
+
+    if (ty >= level->height) {
+        return '.';
+    }
+
+    if ((int)strlen(level->tiles[ty]) <= tx) {
+        return '.';
+    }
+
+    return level->tiles[ty][tx];
+}
+
+static int is_solid(char tile)
+{
+    return tile == '#';
+}
+
+static int is_goal(char tile)
+{
+    return tile == 'G';
+}
+
+static int is_trap(char tile)
+{
+    return tile == 'X';
+}
+
+static int intersects_goal(const Level *level, const Player *p)
+{
+    int left = (int)(p->x / TILE_SIZE);
+    int right = (int)((p->x + PLAYER_W - 1.0f) / TILE_SIZE);
+    int top = (int)(p->y / TILE_SIZE);
+    int bottom = (int)((p->y + PLAYER_H - 1.0f) / TILE_SIZE);
+    int x;
+    int y;
+
+    for (y = top; y <= bottom; y++) {
+        for (x = left; x <= right; x++) {
+            if (is_goal(tile_at(level, x, y))) {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static int intersects_trap(const Level *level, const Player *p)
+{
+    int left = (int)(p->x / TILE_SIZE);
+    int right = (int)((p->x + PLAYER_W - 1.0f) / TILE_SIZE);
+    int top = (int)(p->y / TILE_SIZE);
+    int bottom = (int)((p->y + PLAYER_H - 1.0f) / TILE_SIZE);
+    int x;
+    int y;
+
+    for (y = top; y <= bottom; y++) {
+        for (x = left; x <= right; x++) {
+            if (is_trap(tile_at(level, x, y))) {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static void move_player_x(const Level *level, Player *p)
+{
+    int top;
+    int bottom;
+    int checkX;
+    int y;
+
+    p->x += p->vx;
+
+    top = (int)(p->y / TILE_SIZE);
+    bottom = (int)((p->y + PLAYER_H - 1.0f) / TILE_SIZE);
+
+    if (p->vx > 0.0f) {
+        checkX = (int)((p->x + PLAYER_W - 1.0f) / TILE_SIZE);
+        for (y = top; y <= bottom; y++) {
+            if (is_solid(tile_at(level, checkX, y))) {
+                p->x = (float)(checkX * TILE_SIZE) - PLAYER_W;
+                p->vx = 0.0f;
+                break;
+            }
+        }
+    } else if (p->vx < 0.0f) {
+        checkX = (int)(p->x / TILE_SIZE);
+        for (y = top; y <= bottom; y++) {
+            if (is_solid(tile_at(level, checkX, y))) {
+                p->x = (float)((checkX + 1) * TILE_SIZE);
+                p->vx = 0.0f;
+                break;
+            }
+        }
+    }
+}
+
+static void move_player_y(const Level *level, Player *p)
+{
+    int left;
+    int right;
+    int checkY;
+    int x;
+
+    p->y += p->vy;
+    p->onGround = 0;
+
+    left = (int)(p->x / TILE_SIZE);
+    right = (int)((p->x + PLAYER_W - 1.0f) / TILE_SIZE);
+
+    if (p->vy > 0.0f) {
+        checkY = (int)((p->y + PLAYER_H - 1.0f) / TILE_SIZE);
+        for (x = left; x <= right; x++) {
+            if (is_solid(tile_at(level, x, checkY))) {
+                p->y = (float)(checkY * TILE_SIZE) - PLAYER_H;
+                p->vy = 0.0f;
+                p->onGround = 1;
+                break;
+            }
+        }
+    } else if (p->vy < 0.0f) {
+        checkY = (int)(p->y / TILE_SIZE);
+        for (x = left; x <= right; x++) {
+            if (is_solid(tile_at(level, x, checkY))) {
+                p->y = (float)((checkY + 1) * TILE_SIZE);
+                p->vy = 0.0f;
+                break;
+            }
+        }
+    }
+}
+
+static int check_grounded(const Level *level, const Player *p)
+{
+    int left = (int)(p->x / TILE_SIZE);
+    int right = (int)((p->x + PLAYER_W - 1.0f) / TILE_SIZE);
+    int probeY = (int)((p->y + PLAYER_H) / TILE_SIZE);
+    int x;
+
+    for (x = left; x <= right; x++) {
+        if (is_solid(tile_at(level, x, probeY))) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static float clampf(float v, float minV, float maxV)
+{
+    if (v < minV) {
+        return minV;
+    }
+    if (v > maxV) {
+        return maxV;
+    }
+    return v;
+}
+
+static void render_background(GSGLOBAL *gsGlobal, const GameTextures *textures)
+{
+    if (textures->hasBackground) {
+        gsKit_prim_sprite_texture(gsGlobal, (GSTEXTURE *)&textures->background,
+                                  0.0f, 0.0f, 0.0f, 0.0f,
+                                  (float)SCREEN_W, (float)SCREEN_H,
+                                  (float)textures->background.Width, (float)textures->background.Height,
+                                  0, GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00));
+    }
+}
+
+static void render_level(GSGLOBAL *gsGlobal, const Level *level, float camX, const GameTextures *textures)
+{
+    int x;
+    int y;
+    int startX = (int)(camX / TILE_SIZE);
+    int endX = (int)((camX + SCREEN_W) / TILE_SIZE) + 1;
+
+    if (startX < 0) {
+        startX = 0;
+    }
+    if (endX > level->width) {
+        endX = level->width;
+    }
+
+    for (y = 0; y < level->height; y++) {
+        for (x = startX; x < endX; x++) {
+            char t = tile_at(level, x, y);
+            float px = (float)(x * TILE_SIZE) - camX;
+            float py = (float)(y * TILE_SIZE);
+
+            if (t == '#') {
+                if (textures->hasTileSolid) {
+                    gsKit_prim_sprite(gsGlobal, px, py, px + TILE_SIZE, py + TILE_SIZE, 1,
+                                      GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00));
+                    gsKit_prim_sprite_texture(gsGlobal, (GSTEXTURE *)&textures->tileSolid,
+                                              px, py, 0.0f, 0.0f,
+                                              px + TILE_SIZE, py + TILE_SIZE,
+                                              (float)textures->tileSolid.Width, (float)textures->tileSolid.Height,
+                                              1, GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00));
+                } else {
+                    gsKit_prim_sprite(gsGlobal, px, py, px + TILE_SIZE, py + TILE_SIZE, 1,
+                                      GS_SETREG_RGBAQ(0x40, 0x40, 0x40, 0x80, 0x00));
+                }
+            } else if (t == 'X') {
+                if (textures->hasTileTrap) {
+                    gsKit_prim_sprite(gsGlobal, px, py, px + TILE_SIZE, py + TILE_SIZE, 1,
+                                      GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00));
+                    gsKit_prim_sprite_texture(gsGlobal, (GSTEXTURE *)&textures->tileTrap,
+                                              px, py, 0.0f, 0.0f,
+                                              px + TILE_SIZE, py + TILE_SIZE,
+                                              (float)textures->tileTrap.Width, (float)textures->tileTrap.Height,
+                                              1, GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00));
+                } else {
+                    gsKit_prim_sprite(gsGlobal, px, py, px + TILE_SIZE, py + TILE_SIZE, 1,
+                                      GS_SETREG_RGBAQ(0xD0, 0x20, 0x20, 0x80, 0x00));
+                }
+            } else if (t == 'G') {
+                if (textures->hasTileGoal) {
+                    gsKit_prim_sprite(gsGlobal, px, py, px + TILE_SIZE, py + TILE_SIZE, 1,
+                                      GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x80, 0x00));
+                    gsKit_prim_sprite_texture(gsGlobal, (GSTEXTURE *)&textures->tileGoal,
+                                              px, py, 0.0f, 0.0f,
+                                              px + TILE_SIZE, py + TILE_SIZE,
+                                              (float)textures->tileGoal.Width, (float)textures->tileGoal.Height,
+                                              1, GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00));
+                } else {
+                    gsKit_prim_sprite(gsGlobal, px, py, px + TILE_SIZE, py + TILE_SIZE, 1,
+                                      GS_SETREG_RGBAQ(0x20, 0xC0, 0x40, 0x80, 0x00));
+                }
+            }
+        }
+    }
+}
+
+static void render_player(GSGLOBAL *gsGlobal,
+                          const Player *p,
+                          float camX,
+                          const GameTextures *textures,
+                          AnimationClip clips[PLAYER_ANIM_COUNT],
+                          PlayerAnimState state,
+                          int frameIndex,
+                          int facingRight)
+{
+    AnimationClip *clip = get_player_clip_safe(clips, state);
+
+    if (clip != NULL && clip->count > 0) {
+        int idx = frameIndex % clip->count;
+        GSTEXTURE *tex = &clip->frames[idx];
+        float drawX = (p->x - camX) + ((PLAYER_W - (float)tex->Width) * 0.5f);
+        float drawY = (p->y + PLAYER_H) - (float)tex->Height + 8.0f;
+        float x2 = drawX + (float)tex->Width;
+        float y2 = drawY + (float)tex->Height;
+        float uL = facingRight ? 0.0f : (float)tex->Width;
+        float uR = facingRight ? (float)tex->Width : 0.0f;
+        u64 color = GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00);
+        gsKit_prim_quad_texture(gsGlobal, tex,
+                                drawX, drawY, uL, 0.0f,
+                                x2,    drawY, uR, 0.0f,
+                                drawX, y2,    uL, (float)tex->Height,
+                                x2,    y2,    uR, (float)tex->Height,
+                                2, color);
+    } else if (textures->hasPlayer) {
+        gsKit_prim_sprite_texture(gsGlobal, (GSTEXTURE *)&textures->player,
+                                  p->x - camX, p->y, 0.0f, 0.0f,
+                                  p->x - camX + PLAYER_W, p->y + PLAYER_H,
+                                  (float)textures->player.Width, (float)textures->player.Height,
+                                  2, GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00));
+    } else {
+        gsKit_prim_sprite(gsGlobal, p->x - camX, p->y, p->x - camX + PLAYER_W, p->y + PLAYER_H, 2,
+                          GS_SETREG_RGBAQ(0xFF, 0xC0, 0x20, 0x80, 0x00));
+    }
+}
+
+static void reset_player_to_spawn(const Level *level, Player *player)
+{
+    player->x = level->spawnX;
+    player->y = level->spawnY;
+    player->vx = 0.0f;
+    player->vy = 0.0f;
+    player->onGround = 0;
+    player->facingRight = 1;
+    player->coyoteTimer = 0;
+    player->jumpBufferTimer = 0;
+}
+
+int main(int argc, char *argv[])
+{
+    const int padPort = 0;
+    const int padSlot = 0;
+    struct padButtonStatus buttons;
+    unsigned int padData = 0;
+    unsigned int prevPadData = 0;
+    static char *padBuf = NULL;
+    int padReady = 0;
+    int lastPadState = -1;
+    unsigned int frameCount = 0;
+
+    Level level;
+    LevelList levelList;
+    Player player;
+    float cameraX = 0.0f;
+    int gameOver = 0;
+    int hurtTimer = 0;
+    int clearTimer = 0;
+    GameTextures textures;
+    AnimationClip playerAnims[PLAYER_ANIM_COUNT];
+    PlayerAnimator animator;
+    BgmPlayer bgm;
+    int padModulesOk = 0;
+    int audioModulesOk = 0;
+
+    GSGLOBAL *gsGlobal;
+    AssetBank assetBank;
+
+    LOG("main start");
+    memset(&textures, 0, sizeof(textures));
+    animator_init(&animator);
+
+    sceSifInitRpc(0);
+
+    /* SBV patches: required for loading IOP modules from cdrom0: on real PS2 */
+    sbv_patch_enable_lmb();
+    sbv_patch_disable_prefix_check();
+
+    load_all_iop_modules(&padModulesOk, &audioModulesOk);
+
+    if (padModulesOk) {
+        if (padInit(0) != 0) {
+            LOG("padInit ok");
+        } else {
+            padModulesOk = 0;
+        }
+    }
+
+    if (padModulesOk) {
+        padBuf = (char *)memalign(64, 256);
+        if (padBuf != NULL && padPortOpen(padPort, padSlot, padBuf) != 0) {
+            padReady = 1;
+            LOG("padPortOpen ok (port=%d slot=%d)", padPort, padSlot);
+        }
+    }
+
+    /* ---- Phase 1: Read all assets from CD to RAM (debug screen) ---- */
+    load_all_assets_from_cd(&assetBank);
+
+    if (!load_level_list("levels.txt", &levelList)) {
+        scr_printf("ERROR: cannot load level list!\n");
+        LOG("cannot continue without level list");
+        while (1) { }
+    }
+
+    if (!parse_level_file(levelList.paths[levelList.current], &level)) {
+        scr_printf("ERROR: cannot load level: %s\n", levelList.paths[levelList.current]);
+        LOG("cannot load initial level: %s", levelList.paths[levelList.current]);
+        while (1) { }
+    }
+
+    reset_player_to_spawn(&level, &player);
+
+    /* ---- Phase 2: Init GS and upload textures from RAM to VRAM ---- */
+    dmaKit_init(D_CTRL_RELE_OFF, D_CTRL_MFD_OFF, D_CTRL_STS_UNSPEC,
+                D_CTRL_STD_OFF, D_CTRL_RCYC_8, 1 << DMA_CHANNEL_GIF);
+    dmaKit_chan_init(DMA_CHANNEL_GIF);
+
+    gsGlobal = gsKit_init_global();
+    gsGlobal->Mode = GS_MODE_NTSC;
+    gsGlobal->Width = SCREEN_W;
+    gsGlobal->Height = SCREEN_H;
+    gsGlobal->PSM = GS_PSM_CT32;
+    gsGlobal->PSMZ = GS_PSMZ_16S;
+    gsGlobal->ZBuffering = GS_SETTING_OFF;
+    gsGlobal->PrimAlphaEnable = GS_SETTING_ON;
+    gsGlobal->PABE = GS_SETTING_OFF;
+
+    gsKit_init_screen(gsGlobal);
+    gsKit_mode_switch(gsGlobal, GS_ONESHOT);
+
+    /* Alpha blend: source-over  Cv = (Cs - Cd) * As / 128 + Cd */
+    gsKit_set_primalpha(gsGlobal, GS_SETREG_ALPHA(0, 1, 0, 1, 0), 0);
+
+    /* Alpha test: discard pixels with alpha == 0 */
+    gsKit_set_test(gsGlobal, GS_ATEST_ON);
+    gsKit_sync_flip(gsGlobal);
+
+    upload_all_assets_to_vram(gsGlobal, &assetBank, &textures, playerAnims);
+
+    if (!textures.hasPlayer) {
+        LOG("fallback to debug rectangle player (missing assets/player.ps2tex)");
+    }
+
+    if (!init_bgm_player(&bgm, BGM_FILE_PATH, audioModulesOk)) {
+        LOG("BGM disabled (put a PCM WAV at %s)", BGM_FILE_PATH);
+    }
+
+    while (1) {
+        update_bgm_stream(&bgm);
+
+        if (padReady) {
+            int state = padGetState(padPort, padSlot);
+
+            if (state != lastPadState) {
+                LOG("pad state changed: %d", state);
+                lastPadState = state;
+            }
+
+            if (state == PAD_STATE_STABLE || state == PAD_STATE_FINDCTP1) {
+                if (padRead(padPort, padSlot, &buttons) != 0) {
+                    padData = 0xFFFF ^ buttons.btns;
+                }
+            }
+        }
+
+        if (!gameOver && clearTimer == 0 && hurtTimer == 0) {
+            {
+                float targetSpeed = (padData & PAD_CROSS) ? PLAYER_RUN_SPEED : PLAYER_WALK_SPEED;
+
+                player.vx = 0.0f;
+                if (padData & PAD_LEFT) {
+                    player.vx = -targetSpeed;
+                    player.facingRight = 0;
+                }
+                if (padData & PAD_RIGHT) {
+                    player.vx = targetSpeed;
+                    player.facingRight = 1;
+                }
+            }
+
+            if ((padData & PAD_CIRCLE) && !(prevPadData & PAD_CIRCLE)) {
+                player.jumpBufferTimer = JUMP_BUFFER_FRAMES;
+            } else if (player.jumpBufferTimer > 0) {
+                player.jumpBufferTimer--;
+            }
+
+            player.onGround = check_grounded(&level, &player);
+            if (player.onGround) {
+                player.coyoteTimer = COYOTE_FRAMES;
+                if (player.vy > 0.0f) {
+                    player.vy = 0.0f;
+                }
+            } else if (player.coyoteTimer > 0) {
+                player.coyoteTimer--;
+            }
+
+            if (player.jumpBufferTimer > 0 && player.coyoteTimer > 0) {
+                player.vy = JUMP_VELOCITY;
+                player.onGround = 0;
+                player.coyoteTimer = 0;
+                player.jumpBufferTimer = 0;
+            }
+
+            player.vy += GRAVITY;
+            if (player.vy > MAX_FALL_SPEED) {
+                player.vy = MAX_FALL_SPEED;
+            }
+
+            move_player_x(&level, &player);
+            move_player_y(&level, &player);
+
+            /* Re-check ground after movement so animator sees correct state */
+            if (!player.onGround) {
+                player.onGround = check_grounded(&level, &player);
+            }
+
+            if (intersects_trap(&level, &player)) {
+                hurtTimer = HURT_FRAMES;
+                player.vx = 0.0f;
+                player.vy = -2.0f;
+                LOG("player hurt by trap");
+            }
+
+            if (intersects_goal(&level, &player)) {
+                clearTimer = CLEAR_FRAMES;
+                player.vx = 0.0f;
+                player.vy = 0.0f;
+                LOG("level clear animation");
+            }
+
+            if (player.y > (float)(level.height * TILE_SIZE + 96)) {
+                gameOver = 1;
+                LOG("GAME OVER: fell into hole");
+            }
+        } else if (hurtTimer > 0) {
+            hurtTimer--;
+            player.vy += GRAVITY;
+            if (player.vy > MAX_FALL_SPEED) {
+                player.vy = MAX_FALL_SPEED;
+            }
+            move_player_x(&level, &player);
+            move_player_y(&level, &player);
+
+            if (hurtTimer == 0) {
+                gameOver = 1;
+                LOG("GAME OVER: hurt finished");
+            }
+        } else if (clearTimer > 0) {
+            clearTimer--;
+            if (clearTimer == 0) {
+                levelList.current = (levelList.current + 1) % levelList.count;
+                if (parse_level_file(levelList.paths[levelList.current], &level)) {
+                    reset_player_to_spawn(&level, &player);
+                }
+            }
+        } else {
+            if ((padData & PAD_START) && !(prevPadData & PAD_START)) {
+                reset_player_to_spawn(&level, &player);
+                gameOver = 0;
+                hurtTimer = 0;
+                clearTimer = 0;
+                LOG("restart level");
+            }
+        }
+
+        if ((padData & PAD_R1) && !(prevPadData & PAD_R1)) {
+            levelList.current = (levelList.current + 1) % levelList.count;
+            if (parse_level_file(levelList.paths[levelList.current], &level)) {
+                reset_player_to_spawn(&level, &player);
+                gameOver = 0;
+                hurtTimer = 0;
+                clearTimer = 0;
+            }
+        }
+
+        if ((padData & PAD_L1) && !(prevPadData & PAD_L1)) {
+            levelList.current = (levelList.current - 1 + levelList.count) % levelList.count;
+            if (parse_level_file(levelList.paths[levelList.current], &level)) {
+                reset_player_to_spawn(&level, &player);
+                gameOver = 0;
+                hurtTimer = 0;
+                clearTimer = 0;
+            }
+        }
+
+        animator_step(&animator, playerAnims, &player, padData, gameOver, hurtTimer, clearTimer);
+
+        {
+            float mapPixelW = (float)(level.width * TILE_SIZE);
+            float maxCamX = mapPixelW - (float)SCREEN_W;
+            if (maxCamX < 0.0f) {
+                maxCamX = 0.0f;
+            }
+            cameraX = clampf(player.x + (PLAYER_W * 0.5f) - ((float)SCREEN_W * 0.5f), 0.0f, maxCamX);
+        }
+
+        if ((frameCount % 300) == 0) {
+            LOG("frame=%u level=%d pos=(%.1f, %.1f) camX=%.1f", frameCount, levelList.current, player.x, player.y, cameraX);
+        }
+        frameCount++;
+
+        gsKit_clear(gsGlobal, GS_SETREG_RGBAQ(0x70, 0xB5, 0xFF, 0x80, 0x00));
+        render_background(gsGlobal, &textures);
+        render_level(gsGlobal, &level, cameraX, &textures);
+        render_player(gsGlobal, &player, cameraX, &textures, playerAnims, animator.state, animator.frame, player.facingRight);
+
+        if (gameOver) {
+            gsKit_prim_sprite(gsGlobal, 0.0f, 0.0f, (float)SCREEN_W, (float)SCREEN_H, 3,
+                              GS_SETREG_RGBAQ(0x80, 0x00, 0x00, 0x40, 0x00));
+        }
+
+        gsKit_queue_exec(gsGlobal);
+        gsKit_sync_flip(gsGlobal);
+
+        prevPadData = padData;
+    }
+
+    shutdown_bgm_player(&bgm);
+
+    return 0;
+}
