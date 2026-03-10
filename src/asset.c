@@ -29,7 +29,7 @@ void load_all_assets_from_cd(AssetBank *bank)
     memset(bank, 0, sizeof(*bank));
 
     init_scr();
-    scr_printf("=== PS2 Platformer - Loading ===\n\n");
+    scr_printf("=== PS2 Game by Jeong Jimin - Loading ===\n\n");
 
     scr_printf("Opening SPRITES.PAK ...\n");
     if (!load_spritepack("sprites.pak", &pack)) {

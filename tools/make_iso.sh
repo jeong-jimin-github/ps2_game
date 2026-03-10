@@ -82,6 +82,11 @@ find "$STAGING" -type f | sort | while read -r f; do
 done
 echo ""
 
+# Remove existing ISO to avoid device-busy errors
+if [ -f "$ISO_FILE" ]; then
+    rm -f "$ISO_FILE"
+fi
+
 # --- build ISO ---
 # -iso-level 2  : allow filenames up to 31 chars (required for PS2TEX names)
 # -D             : allow deep directory nesting without relocation
