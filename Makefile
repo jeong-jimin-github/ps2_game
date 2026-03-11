@@ -1,6 +1,7 @@
 EE_BIN = game_engine.elf
 EE_OBJS = main.o src/system.o src/audio.o src/sprite.o src/asset.o \
-         src/animation.o src/level.o src/physics.o src/render.o
+         src/animation.o src/level.o src/physics.o src/render.o \
+         src/font.o src/sfx.o
 
 SHELL := /bin/bash
 
