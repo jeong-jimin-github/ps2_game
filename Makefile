@@ -2,7 +2,7 @@ EE_BIN = game_engine.elf
 EE_OBJS = main.o src/system.o src/audio.o src/sprite.o src/asset.o \
          src/animation.o src/level.o src/physics.o src/render.o
 
-SHELL := /usr/bin/bash
+SHELL := /bin/bash
 
 ENV_SH := $(abspath ./env.sh)
 ifneq ($(wildcard $(ENV_SH)),)
