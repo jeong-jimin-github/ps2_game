@@ -4,3 +4,5 @@
 *.iso
 *.elf
 *.bak
+*.o
+sprites.pak
