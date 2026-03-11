@@ -14,13 +14,16 @@ jobs:
       image: ps2dev/ps2dev:latest
 
     steps:
+      - name: Install system dependencies
+        run: |
+          apk update -q
+          apk add --no-cache git make bash python3 py3-pip zip
+
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Python dependencies and zip
+      - name: Install Python packages
         run: |
-          apk update -q
-          apk add --no-cache python3 py3-pip zip
           pip3 install pillow pycdlib --break-system-packages \
             || pip3 install pillow pycdlib
 
