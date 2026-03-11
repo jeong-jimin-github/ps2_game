@@ -17,38 +17,7 @@ PlayStation 2 홈브류 2D 플랫폼 게임 프로젝트입니다.
   2. RAM -> VRAM
 - 스프라이트 팩(`sprites.pak`) 로딩 + 개별 `.ps2tex` 폴백 지원
 
-## 프로젝트 구조
-
-```text
-.
-|- main.c
-|- build.sh
-|- Makefile
-|- tools/
-|  |- make_iso.sh
-|  |- png_to_ps2tex.py
-|  |- make_spritepack.py
-|- src/
-|  |- types.h
-|  |- system.c/.h
-|  |- audio.c/.h
-|  |- sprite.c/.h
-|  |- asset.c/.h
-|  |- animation.c/.h
-|  |- level.c/.h
-|  |- physics.c/.h
-|  |- render.c/.h
-|- assets/
-|- levels/
-`- docs/
-   `- ARCHITECTURE.md
-```
-
-모듈 상세 문서: `docs/ARCHITECTURE.md`
-
 ## 빌드 (권장)
-
-Windows 경로 문제(`C:\...` vs `/c/...`)를 피하려면 `build.sh` 사용을 권장합니다.
 
 ```bash
 bash build.sh          # 빌드
@@ -60,7 +29,7 @@ bash build.sh rebuild  # 클린 + 전체 재빌드
 생성 결과:
 
 - ELF: `game_engine.elf`
-- ISO: `game.iso` (`tools/make_iso.sh` 기본값)
+- ISO: `SLUS_209.99.PS2_PLATFORMER.iso` (`tools/make_iso.sh` 기본값)
 
 ## 대체 빌드 (Makefile)
 
@@ -114,13 +83,39 @@ data:
 
 에셋 변환은 `build.sh`에서 자동으로 처리됩니다.
 
+## 레벨 에디터 (GUI)
+
+`tools/level_editor.py`로 레벨 텍스트를 시각적으로 편집할 수 있습니다.
+
+```bash
+python tools/level_editor.py levels/level1.txt
+```
+
+주요 기능:
+
+- 타일 페인팅 (`#`, `.`, `G`, `X`)
+- 마우스로 스폰 좌표(`spawn=x,y`) 지정
+- 레벨 크기(`width`, `height`) 조정
+- `levels/*.txt` 형식으로 저장
+
 ## ISO 관련 참고
 
 - ISO 생성 스크립트: `tools/make_iso.sh`
 - PS2 호환을 위해 스테이징 파일은 평탄화(flat) + 대문자 변환
 - `SYSTEM.CNF`는 CRLF 줄바꿈으로 생성
+- 기본 부팅 파일명은 실게임 스타일의 ID 형식(`SLUS_209.99`)으로 생성
+- 기본 ISO 파일명은 OPL 친화 형식(`GAMEID.TITLE.iso`)으로 생성
 
-`game.iso`가 잠겨 있을 때(예: PCSX2에서 사용 중)는 앱을 종료하거나 다른 파일명으로 생성하세요.
+게임 ID/타이틀 지정:
+
+```bash
+PS2_GAME_ID=SLUS_209.99 PS2_GAME_TITLE="SUPER BLOCK ADVENTURE" bash build.sh iso
+```
+
+- `PS2_GAME_ID` 형식: `AAAA_123.45`
+- `PS2_GAME_TITLE`은 OPL 파일명 규칙에 맞게 자동 정규화(공백/특수문자 -> `_`)
+
+생성 대상 ISO가 잠겨 있을 때(예: PCSX2에서 사용 중)는 앱을 종료하거나 다른 파일명으로 생성하세요.
 
 ```bash
 bash tools/make_iso.sh game_new.iso
@@ -128,24 +123,7 @@ bash tools/make_iso.sh game_new.iso
 
 ## 요구 사항
 
-- `/c/Users/jm/Documents/ps2dev` 아래 PS2 툴체인 설치
-  - `ps2sdk`
-  - `gsKit`
-  - EE 컴파일러 (`mips64r5900el-ps2-elf-gcc`)
-- MSYS2 bash 환경
-- Python 3 (에셋 변환 스크립트용)
-- ISO 생성 도구 (`xorriso`, `mkisofs`, `genisoimage` 중 하나)
-
-## 문제 해결
-
-### `/usr/bin/bash: ... No such file or directory` + `C:\Users\...gcc` 오류
-
-원인: Windows 백슬래시 경로가 bash 명령에서 깨지면서 발생합니다.
-
-해결: `bash build.sh` 사용(권장), 또는 모든 툴체인 경로를 MSYS2 스타일(`/c/...`)로 통일하세요.
-
-### ISO 생성 시 `Device or resource busy`
-
-원인: 대상 ISO 파일이 현재 열려 있거나 마운트되어 있습니다.
-
-해결: 해당 파일을 사용하는 에뮬레이터/프로그램을 종료하거나 다른 출력 파일명으로 생성하세요.
+- `ps2sdk`
+- `MSYS2`
+- Python3
+- `xorriso`

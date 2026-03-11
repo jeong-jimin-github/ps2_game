@@ -42,7 +42,7 @@ void make_cdrom_path(const char *src, char *dst, size_t dstSize)
 void iop_delay(void)
 {
     volatile int d;
-    for (d = 0; d < 500000; d++) { }
+    for (d = 0; d < 15000000; d++) { }
 }
 
 void load_all_iop_modules(int *padOk, int *audioOk)
@@ -112,6 +112,7 @@ void load_all_iop_modules(int *padOk, int *audioOk)
     FlushCache(0);
     iop_delay();
     iop_delay();
+    iop_delay();
 
     LOG("all IOP modules loaded (pad=%d audio=%d)", *padOk, *audioOk);
 }
@@ -135,17 +136,19 @@ FILE *open_binary_file(const char *path)
     char altPath[MAX_PATH_LEN + 32];
     int attempt;
 
-    for (attempt = 0; attempt < 3; attempt++) {
+    for (attempt = 0; attempt < 15; attempt++) {
         if (attempt > 0) {
             FlushCache(0);
             iop_delay();
             iop_delay();
+            if (attempt >= 5) iop_delay(); /* 5회 이상 실패 시 더 긴 대기 */
         }
 
         if (strchr(path, ':') == NULL) {
             make_cdrom_path(path, altPath, sizeof(altPath));
             fp = fopen(altPath, "rb");
             if (fp != NULL) {
+                LOG("open ok (attempt %d): %s", attempt, altPath);
                 return fp;
             }
         }
@@ -169,7 +172,7 @@ FILE *open_binary_file(const char *path)
         }
     }
 
-    LOG("open failed: %s", path);
+    LOG("open failed after %d attempts: %s", attempt, path);
     return NULL;
 }
 
@@ -179,11 +182,12 @@ FILE *open_level_file(const char *path)
     char altPath[MAX_PATH_LEN + 32];
     int attempt;
 
-    for (attempt = 0; attempt < 3; attempt++) {
+    for (attempt = 0; attempt < 15; attempt++) {
         if (attempt > 0) {
             FlushCache(0);
             iop_delay();
             iop_delay();
+            if (attempt >= 5) iop_delay();
         }
 
         if (strchr(path, ':') == NULL) {
@@ -218,7 +222,7 @@ FILE *open_level_file(const char *path)
         }
     }
 
-    LOG("open failed: %s", path);
+    LOG("open failed after %d attempts: %s", attempt, path);
     return NULL;
 }
 

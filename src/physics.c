@@ -5,6 +5,8 @@
 #include "physics.h"
 #include "level.h"
 
+#include <string.h>
+
 int intersects_goal(const Level *level, const Player *p)
 {
     int left = (int)(p->x / TILE_SIZE);
@@ -139,6 +141,7 @@ void reset_player_to_spawn(const Level *level, Player *player)
     player->facingRight = 1;
     player->coyoteTimer = 0;
     player->jumpBufferTimer = 0;
+    player->invincTimer = 0;
 }
 
 float clampf(float v, float minV, float maxV)
@@ -150,4 +153,198 @@ float clampf(float v, float minV, float maxV)
         return maxV;
     }
     return v;
+}
+
+/* ── 수집 가능 아이템 교차 ───────────────────────── */
+char intersects_collectible(Level *level, const Player *p)
+{
+    int left = (int)(p->x / TILE_SIZE);
+    int right = (int)((p->x + PLAYER_W - 1.0f) / TILE_SIZE);
+    int top = (int)(p->y / TILE_SIZE);
+    int bottom = (int)((p->y + PLAYER_H - 1.0f) / TILE_SIZE);
+    int x, y;
+
+    for (y = top; y <= bottom; y++) {
+        for (x = left; x <= right; x++) {
+            char t = tile_at(level, x, y);
+            if (is_collectible(t)) {
+                level->tiles[y][x] = '.';
+                return t;
+            }
+        }
+    }
+    return 0;
+}
+
+/* ── 코인 블록 머리 부딪힘 ───────────────────────── */
+int check_head_bump_coin_block(Level *level, const Player *p, int *outTx, int *outTy)
+{
+    float nextY = p->y + p->vy;
+    int left = (int)(p->x / TILE_SIZE);
+    int right = (int)((p->x + PLAYER_W - 1.0f) / TILE_SIZE);
+    int checkY = (int)(nextY / TILE_SIZE);
+    int x;
+
+    if (p->vy >= 0.0f) {
+        return 0;
+    }
+
+    for (x = left; x <= right; x++) {
+        if (is_coin_block(tile_at(level, x, checkY))) {
+            level->tiles[checkY][x] = 'E';
+            *outTx = x;
+            *outTy = checkY;
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ── 이동 엔티티 업데이트 ────────────────────────── */
+void update_moving_entities(GameWorld *world)
+{
+    int i;
+    for (i = 0; i < world->movingEntCount; i++) {
+        MovingEntity *ent = &world->movingEnts[i];
+        float delta;
+        if (!ent->active) continue;
+
+        ent->prevX = ent->x;
+        ent->prevY = ent->y;
+
+        delta = ent->forward ? ent->speed : -ent->speed;
+
+        if (ent->dirHorizontal) {
+            ent->x += delta;
+            if (ent->x >= ent->startX + ent->rangePixels) {
+                ent->x = ent->startX + ent->rangePixels;
+                ent->forward = 0;
+            } else if (ent->x <= ent->startX) {
+                ent->x = ent->startX;
+                ent->forward = 1;
+            }
+        } else {
+            ent->y += delta;
+            if (ent->y >= ent->startY + ent->rangePixels) {
+                ent->y = ent->startY + ent->rangePixels;
+                ent->forward = 0;
+            } else if (ent->y <= ent->startY) {
+                ent->y = ent->startY;
+                ent->forward = 1;
+            }
+        }
+    }
+}
+
+/* ── AABB 충돌 헬퍼 ──────────────────────────────── */
+static int aabb_overlap(float ax, float ay, float aw, float ah,
+                        float bx, float by, float bw, float bh)
+{
+    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+/* ── 이동 플랫폼 탑승 ───────────────────────────── */
+int check_on_moving_platform(const GameWorld *world, Player *p)
+{
+    int i;
+    float footY = p->y + PLAYER_H;
+
+    for (i = 0; i < world->movingEntCount; i++) {
+        const MovingEntity *ent = &world->movingEnts[i];
+        float dx, dy;
+        if (!ent->active || ent->isTrap) continue;
+
+        if (p->x + PLAYER_W > ent->x && p->x < ent->x + ent->width) {
+            if (footY >= ent->y && footY <= ent->y + 6.0f && p->vy >= 0.0f) {
+                p->y = ent->y - PLAYER_H;
+                p->vy = 0.0f;
+                p->onGround = 1;
+
+                dx = ent->x - ent->prevX;
+                dy = ent->y - ent->prevY;
+                p->x += dx;
+                p->y += dy;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* ── 이동 함정 교차 ──────────────────────────────── */
+int intersects_moving_trap(const GameWorld *world, const Player *p)
+{
+    int i;
+    for (i = 0; i < world->movingEntCount; i++) {
+        const MovingEntity *ent = &world->movingEnts[i];
+        if (!ent->active || !ent->isTrap) continue;
+
+        if (aabb_overlap(p->x, p->y, PLAYER_W, PLAYER_H,
+                         ent->x, ent->y, ent->width, ent->height)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* ── 스폰된 아이템 업데이트 ──────────────────────── */
+void update_spawned_items(GameWorld *world)
+{
+    int i;
+    for (i = 0; i < world->itemCount; i++) {
+        SpawnedItem *item = &world->items[i];
+        if (!item->active) continue;
+
+        if (item->type == 'C') {
+            item->y += ITEM_RISE_SPEED;
+            item->timer--;
+            if (item->timer <= 0) {
+                item->active = 0;
+            }
+        } else {
+            if (item->y > item->targetY) {
+                item->y += ITEM_RISE_SPEED;
+                if (item->y <= item->targetY) {
+                    item->y = item->targetY;
+                }
+            }
+        }
+    }
+}
+
+/* ── 스폰된 아이템 수집 ──────────────────────────── */
+int collect_spawned_item(GameWorld *world, const Player *p)
+{
+    int i;
+    for (i = 0; i < world->itemCount; i++) {
+        SpawnedItem *item = &world->items[i];
+        if (!item->active || item->type == 'C') continue;
+
+        if (item->y <= item->targetY) {
+            if (aabb_overlap(p->x, p->y, PLAYER_W, PLAYER_H,
+                             item->x, item->y, (float)TILE_SIZE, (float)TILE_SIZE)) {
+                int t = item->type;
+                item->active = 0;
+                return t;
+            }
+        }
+    }
+    return 0;
+}
+
+/* ── 블록에서 아이템 스폰 ────────────────────────── */
+void spawn_item_from_block(GameWorld *world, int tx, int ty, int type)
+{
+    SpawnedItem *item;
+    if (world->itemCount >= MAX_SPAWNED_ITEMS) return;
+
+    item = &world->items[world->itemCount];
+    item->x = (float)(tx * TILE_SIZE);
+    item->y = (float)(ty * TILE_SIZE);
+    item->targetY = (float)((ty - 1) * TILE_SIZE);
+    item->vy = 0.0f;
+    item->type = type;
+    item->active = 1;
+    item->timer = COIN_BOUNCE_FRAMES;
+    world->itemCount++;
 }

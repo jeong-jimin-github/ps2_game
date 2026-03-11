@@ -76,6 +76,8 @@ SRCS=(
     src/level.c
     src/physics.c
     src/render.c
+    src/font.c
+    src/sfx.c
 )
 
 # ── 함수 정의 ─────────────────────────────────────────────
@@ -110,6 +112,28 @@ do_assets() {
         $PYTHON tools/make_spritepack.py assets sprites.pak
     else
         echo "  (ps2tex 파일 없음, 팩 생성 스킵)"
+    fi
+
+    # WAV 다운샘플 (44100Hz stereo → 11025Hz mono, PS2 RAM 절약)
+    echo "=== Downsampling WAVs ==="
+    for wav in assets/bgm.wav assets/bgm_menu.wav; do
+        if [ -f "$wav" ]; then
+            # .bak 없으면 아직 변환 안 된 원본
+            if [ ! -f "${wav}.bak" ]; then
+                echo "  Converting $wav -> 11025Hz mono 16bit"
+                $PYTHON tools/wav_convert.py "$wav"
+            else
+                echo "  (skip) $wav (already converted, .bak exists)"
+            fi
+        fi
+    done
+
+    # SFX WAV → SPU2 ADPCM 변환
+    echo "=== Converting SFX to ADPCM ==="
+    if ls assets/sfx_*.wav &>/dev/null 2>&1; then
+        $PYTHON tools/wav_to_adpcm.py --all assets
+    else
+        echo "  (no sfx_*.wav files in assets/, skip)"
     fi
 }
 

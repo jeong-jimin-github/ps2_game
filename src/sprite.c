@@ -213,8 +213,24 @@ int load_spritepack(const char *path, SpritePack *pack)
 
     FlushCache(0);
 
-    if (fread(pack->dataSection, 1, dataSize, fp) != dataSize) {
-        LOG("pak data read partial (%u bytes requested)", (unsigned)dataSize);
+    /* CD에서 대용량 fread는 실패할 수 있으므로 32KB 청크 단위로 읽기 */
+    {
+        u32 offset = 0;
+        const u32 chunkSize = 32 * 1024;
+        while (offset < dataSize) {
+            u32 toRead = dataSize - offset;
+            size_t got;
+            if (toRead > chunkSize) toRead = chunkSize;
+            got = fread(pack->dataSection + offset, 1, (size_t)toRead, fp);
+            if (got == 0) {
+                LOG("pak data read stalled at %u/%u bytes", (unsigned)offset, (unsigned)dataSize);
+                break;
+            }
+            offset += (u32)got;
+        }
+        if (offset < dataSize) {
+            LOG("pak data incomplete: got %u of %u bytes", (unsigned)offset, (unsigned)dataSize);
+        }
     }
 
     fclose(fp);

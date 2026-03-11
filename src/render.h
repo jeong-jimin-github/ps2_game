@@ -6,12 +6,37 @@
 #define RENDER_H
 
 #include "types.h"
+#include "font.h"
 
 /** 배경 텍스처 전체 화면 렌더링 */
 void render_background(GSGLOBAL *gsGlobal, const GameTextures *textures);
 
 /** 레벨 타일맵 렌더링 (카메라 오프셋 적용) */
 void render_level(GSGLOBAL *gsGlobal, const Level *level, float camX, const GameTextures *textures);
+
+/** 이동 엔티티 렌더링 */
+void render_moving_entities(GSGLOBAL *gsGlobal, const GameWorld *world, float camX, const GameTextures *textures);
+
+/** 스폰된 아이템 렌더링 */
+void render_spawned_items(GSGLOBAL *gsGlobal, const GameWorld *world, float camX, const GameTextures *textures);
+
+/** HUD 렌더링 (라이프, 코인, 파워업 상태) */
+void render_hud(GSGLOBAL *gsGlobal, const Player *player, const BitmapFont *font);
+
+/** 메인 메뉴 렌더링 */
+void render_main_menu(GSGLOBAL *gsGlobal, const GameTextures *textures,
+                      const BitmapFont *font, int selectedIndex);
+
+/** 설정 메뉴 렌더링 */
+void render_settings_menu(GSGLOBAL *gsGlobal, const GameTextures *textures,
+                          const BitmapFont *font, const GameSettings *settings,
+                          int selectedIndex);
+
+/** 개발자 HUD 로그 렌더링 */
+void render_dev_log(GSGLOBAL *gsGlobal, const BitmapFont *font, const DevLog *log);
+
+/** 로딩 화면 (메뉴 배경 + "Loading..." 텍스트) */
+void render_loading_screen(GSGLOBAL *gsGlobal, const GameTextures *textures, const BitmapFont *font);
 
 /** 플레이어 스프라이트/애니메이션 렌더링 */
 void render_player(GSGLOBAL *gsGlobal,

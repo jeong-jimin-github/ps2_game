@@ -46,7 +46,40 @@
 #define HURT_FRAMES 20
 #define CLEAR_FRAMES 50
 #define BGM_FILE_PATH "bgm.wav"
+#define MENU_BGM_FILE_PATH "bgm_menu.wav"
 #define BGM_STREAM_CHUNK 4096
+#define COINS_PER_1UP 100
+
+/* ── 게임 상태 (씬) ──────────────────────────────── */
+typedef enum {
+    SCENE_MENU = 0,
+    SCENE_SETTINGS,
+    SCENE_PLAY
+} GameScene;
+
+/* ── 설정 ────────────────────────────────────────── */
+typedef struct {
+    int soundOn;     /* 1=on, 0=off */
+    int devMode;     /* 1=developer mode */
+} GameSettings;
+
+/* ── 개발자 로그 링 버퍼 ─────────────────────────── */
+#define DEV_LOG_LINES 6
+#define DEV_LOG_LEN   80
+typedef struct {
+    char lines[DEV_LOG_LINES][DEV_LOG_LEN];
+    int head;
+    int count;
+} DevLog;
+
+/* ── 아이템 / 엔티티 ────────────────────────────── */
+#define MAX_MOVING_ENTITIES 32
+#define MAX_SPAWNED_ITEMS 32
+#define COIN_BOUNCE_FRAMES 16
+#define INVINCIBILITY_FRAMES 60
+#define ITEM_RISE_SPEED -1.5f
+#define MOVING_ENTITY_DEFAULT_SPEED 1.0f
+#define PLAYER_INITIAL_LIVES 3
 
 /* ── 애니메이션 상태 열거형 ──────────────────────── */
 typedef enum {
@@ -88,6 +121,30 @@ typedef struct {
     float spawnY;
 } Level;
 
+/* ── 이동 엔티티 (플랫폼/함정) ───────────────────── */
+typedef struct {
+    float x, y;
+    float startX, startY;
+    float rangePixels;
+    float speed;
+    float prevX, prevY;
+    int dirHorizontal;  /* 1 = horizontal, 0 = vertical */
+    int isTrap;         /* 0 = platform, 1 = trap */
+    int active;
+    int forward;
+    float width, height;
+} MovingEntity;
+
+/* ── 스폰된 아이템 (블록에서 나온 것) ────────────── */
+typedef struct {
+    float x, y;
+    float vy;
+    int type;       /* 'C' = coin, 'M' = mushroom, '1' = 1up */
+    int active;
+    int timer;
+    float targetY;
+} SpawnedItem;
+
 /* ── 플레이어 ────────────────────────────────────── */
 typedef struct {
     float x;
@@ -98,6 +155,10 @@ typedef struct {
     int facingRight;
     int coyoteTimer;
     int jumpBufferTimer;
+    int lives;
+    int coins;
+    int powered;        /* 1 = has mushroom shield */
+    int invincTimer;    /* invincibility frames after hit */
 } Player;
 
 /* ── 레벨 목록 ───────────────────────────────────── */
@@ -114,16 +175,34 @@ typedef struct {
     GSTEXTURE tileTrap;
     GSTEXTURE tileGoal;
     GSTEXTURE background;
+    GSTEXTURE menuBackground;
+    GSTEXTURE tileCoinBlock;
+    GSTEXTURE tileEmptyBlock;
+    GSTEXTURE tileCoin;
+    GSTEXTURE tileMushroom;
+    GSTEXTURE tile1up;
     void *playerPixels;
     void *tileSolidPixels;
     void *tileTrapPixels;
     void *tileGoalPixels;
     void *backgroundPixels;
+    void *menuBackgroundPixels;
+    void *tileCoinBlockPixels;
+    void *tileEmptyBlockPixels;
+    void *tileCoinPixels;
+    void *tileMushroomPixels;
+    void *tile1upPixels;
     int hasPlayer;
     int hasTileSolid;
     int hasTileTrap;
     int hasTileGoal;
     int hasBackground;
+    int hasMenuBackground;
+    int hasTileCoinBlock;
+    int hasTileEmptyBlock;
+    int hasTileCoin;
+    int hasTileMushroom;
+    int hasTile1up;
 } GameTextures;
 
 /* ── 애니메이션 클립 ─────────────────────────────── */
@@ -156,6 +235,22 @@ typedef struct {
     int audioReady;
 } BgmPlayer;
 
+/* ── BGM CD 스트리밍 플레이어 ────────────────────── */
+#define BGM_SBUF_SIZE    (48 * 1024)
+#define BGM_SREAD_CHUNK  (8 * 1024)
+
+typedef struct {
+    void *fp;               /* FILE* (cdrom handle, stored as void*) */
+    unsigned char *buf;     /* read buffer */
+    int  bufLen;            /* valid bytes in buf */
+    long dataStart;         /* file seek offset for PCM data start */
+    int  dataSize;          /* total PCM data bytes */
+    int  dataPos;           /* bytes read from file in current loop */
+    audsrv_fmt_t format;
+    int  opened;            /* WAV parsed, buf allocated, audsrv init'd */
+    int  playing;           /* currently feeding audsrv */
+} BgmStream;
+
 /* ── 스프라이트 팩 ───────────────────────────────── */
 typedef struct {
     char name[PAK_NAME_LEN];
@@ -175,10 +270,25 @@ typedef struct {
     SpriteData tileTrap;
     SpriteData tileGoal;
     SpriteData background;
+    SpriteData menuBackground;
     SpriteData player;
+    SpriteData tileCoinBlock;
+    SpriteData tileEmptyBlock;
+    SpriteData tileCoin;
+    SpriteData tileMushroom;
+    SpriteData tile1up;
     SpriteData animFrames[PLAYER_ANIM_COUNT][MAX_ANIM_FRAMES];
     int animFrameCount[PLAYER_ANIM_COUNT];
     BgmPlayer bgm;
 } AssetBank;
+
+/* ── 게임 월드 (레벨 + 동적 엔티티) ─────────────── */
+typedef struct {
+    Level level;
+    MovingEntity movingEnts[MAX_MOVING_ENTITIES];
+    int movingEntCount;
+    SpawnedItem items[MAX_SPAWNED_ITEMS];
+    int itemCount;
+} GameWorld;
 
 #endif /* TYPES_H */

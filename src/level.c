@@ -144,7 +144,7 @@ char tile_at(const Level *level, int tx, int ty)
 
 int is_solid(char tile)
 {
-    return tile == '#';
+    return tile == '#' || tile == '?' || tile == 'E';
 }
 
 int is_goal(char tile)
@@ -155,4 +155,79 @@ int is_goal(char tile)
 int is_trap(char tile)
 {
     return tile == 'X';
+}
+
+int is_coin_block(char tile)
+{
+    return tile == '?';
+}
+
+int is_collectible(char tile)
+{
+    return tile == 'C' || tile == 'M' || tile == '1';
+}
+
+int is_empty_block(char tile)
+{
+    return tile == 'E';
+}
+
+int parse_moving_entities(const char *path, GameWorld *world)
+{
+    FILE *fp;
+    char line[512];
+    int inMoving = 0;
+
+    world->movingEntCount = 0;
+    world->itemCount = 0;
+
+    fp = open_level_file(path);
+    if (fp == NULL) {
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        trim_line(line);
+        if (line[0] == '\0' || line[0] == ';') {
+            continue;
+        }
+
+        if (!inMoving) {
+            if (strcmp(line, "moving:") == 0) {
+                inMoving = 1;
+            }
+            continue;
+        }
+
+        if (world->movingEntCount < MAX_MOVING_ENTITIES) {
+            MovingEntity *ent = &world->movingEnts[world->movingEntCount];
+            char typeChar = 0;
+            int tx = 0, ty = 0;
+            char dirChar = 'H';
+            int range = 3;
+            float speed = MOVING_ENTITY_DEFAULT_SPEED;
+
+            if (sscanf(line, "%c %d,%d %c %d %f", &typeChar, &tx, &ty, &dirChar, &range, &speed) >= 5) {
+                ent->startX = (float)(tx * TILE_SIZE);
+                ent->startY = (float)(ty * TILE_SIZE);
+                ent->x = ent->startX;
+                ent->y = ent->startY;
+                ent->prevX = ent->x;
+                ent->prevY = ent->y;
+                ent->dirHorizontal = (dirChar == 'H' || dirChar == 'h') ? 1 : 0;
+                ent->rangePixels = (float)(range * TILE_SIZE);
+                ent->speed = speed;
+                ent->isTrap = (typeChar == 'T' || typeChar == 't') ? 1 : 0;
+                ent->active = 1;
+                ent->forward = 1;
+                ent->width = (float)TILE_SIZE * 2;
+                ent->height = (float)TILE_SIZE;
+                world->movingEntCount++;
+            }
+        }
+    }
+
+    fclose(fp);
+    LOG("moving entities loaded: %d", world->movingEntCount);
+    return 1;
 }

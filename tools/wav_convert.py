@@ -5,7 +5,7 @@ import struct
 import sys
 import os
 
-TARGET_RATE = 22050
+TARGET_RATE = 11025
 TARGET_CHANNELS = 1
 TARGET_BITS = 16
 
