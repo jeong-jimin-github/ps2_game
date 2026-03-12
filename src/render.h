@@ -23,6 +23,9 @@ void render_spawned_items(GSGLOBAL *gsGlobal, const GameWorld *world, float camX
 /** HUD 렌더링 (라이프, 코인, 파워업 상태) */
 void render_hud(GSGLOBAL *gsGlobal, const Player *player, const BitmapFont *font);
 
+/** 텍스트 렌더링 (폰트가 없으면 무시) */
+void render_text(GSGLOBAL *gsGlobal, const BitmapFont *font, float x, float y, const char *text, u64 color);
+
 /** 메인 메뉴 렌더링 */
 void render_main_menu(GSGLOBAL *gsGlobal, const GameTextures *textures,
                       const BitmapFont *font, int selectedIndex);

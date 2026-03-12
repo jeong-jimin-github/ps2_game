@@ -558,6 +558,11 @@ int main(int argc, char *argv[])
             if (gameOver) {
                 gsKit_prim_sprite(gsGlobal, 0.0f, 0.0f, (float)SCREEN_W, (float)SCREEN_H, 3,
                                   GS_SETREG_RGBAQ(0x80, 0x00, 0x00, 0x40, 0x00));
+                char buf[32];
+                render_text(gsGlobal, &uiFont, (SCREEN_W / 2) - 64, (SCREEN_H / 2) - 8, "GAME OVER",
+                             GS_SETREG_RGBAQ(0xFF, 0xFF, 0xFF, 0x80, 0x00));
+                render_text(gsGlobal, &uiFont, (SCREEN_W / 2) - 96, (SCREEN_H / 2) + 16, "Press START to retry",
+                             GS_SETREG_RGBAQ(0xFF, 0xFF, 0xFF, 0x80, 0x00));
             }
 
             if (settings.devMode) {

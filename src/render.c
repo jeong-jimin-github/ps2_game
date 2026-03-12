@@ -611,6 +611,13 @@ void render_dev_log(GSGLOBAL *gsGlobal, const BitmapFont *font, const DevLog *dl
     }
 }
 
+void render_text(GSGLOBAL *gsGlobal, const BitmapFont *font, float x, float y, const char *text, u64 color)
+{
+    if (font && font->texValid) {
+        font_draw_string(gsGlobal, font, x, y, 5, color, text);
+    }
+}
+
 void render_loading_screen(GSGLOBAL *gsGlobal, const GameTextures *textures, const BitmapFont *font)
 {
     u64 white = GS_SETREG_RGBAQ(0x80, 0x80, 0x80, 0x80, 0x00);
