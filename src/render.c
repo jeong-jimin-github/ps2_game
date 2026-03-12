@@ -457,9 +457,9 @@ void render_main_menu(GSGLOBAL *gsGlobal, const GameTextures *textures,
 
     /* 타이틀 */
     if (font && font->texValid) {
-        const char *title = "SUPER BLOCK ADVENTURE";
+        const char *title = "PS2 TEST GAME";
         int tw = font_measure_string(font, title);
-        const char *subtitle = "PRESS X OR O";
+        const char *subtitle = "PRESS O TO START";
         int sw = font_measure_string(font, subtitle);
         font_draw_string(gsGlobal, font, cx - (float)tw / 2.0f, 122.0f, 5, cyan, title);
         font_draw_string(gsGlobal, font, cx - (float)sw / 2.0f, 154.0f, 5, white, subtitle);
@@ -482,7 +482,7 @@ void render_main_menu(GSGLOBAL *gsGlobal, const GameTextures *textures,
     }
 
     if (font && font->texValid) {
-        const char *footer = "D-PAD: MOVE   TRIANGLE: BACK";
+        const char *footer = "D-PAD: MOVE / TRIANGLE: BACK";
         int fw = font_measure_string(font, footer);
         font_draw_string(gsGlobal, font, cx - (float)fw / 2.0f, 320.0f, 5, white, footer);
     }
