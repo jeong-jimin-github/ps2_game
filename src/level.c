@@ -62,6 +62,11 @@ int parse_level_file(const char *path, Level *level)
             break;
         }
 
+        /* moving: 섹션이 시작되면 맵 데이터 읽기 종료 */
+        if (strcmp(line, "moving:") == 0) {
+            break;
+        }
+
         strncpy(level->tiles[row], line, MAX_LEVEL_WIDTH);
         level->tiles[row][MAX_LEVEL_WIDTH] = '\0';
 

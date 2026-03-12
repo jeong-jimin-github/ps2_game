@@ -361,7 +361,6 @@ int main(int argc, char *argv[])
                     if (player.coins >= COINS_PER_1UP) {
                         player.coins -= COINS_PER_1UP;
                         player.lives++;
-                        LOG("[F] coinblock 100coin 1UP lives=%d", player.lives);
                         if (settings.soundOn) sfx_play(SFX_1UP);
                         if (settings.devMode)
                             dev_log_push(&devLog, "100coins -> 1UP! lives=%d", player.lives);
@@ -382,7 +381,6 @@ int main(int argc, char *argv[])
                 /* 낙사와 아이템 수집이 같은 프레임에 중복 처리되지 않도록
                  * 낙사 판정을 먼저 수행하고 해당 프레임 로직을 종료합니다. */
                 if (player.y > (float)(level.height * TILE_SIZE + 96)) {
-                    LOG("[D] fall death before-- lives=%d pos=(%.0f,%.0f)", player.lives, player.x, player.y);
                     if (!settings.devMode) {
                         player.lives--;
                     }
@@ -406,11 +404,6 @@ int main(int argc, char *argv[])
                     break;
                 }
 
-                /* 맵 바깥으로 떨어진 상태에서는 아이템 수집/트랩/골 판정을 건너뜀 */
-                if (player.y > (float)(level.height * TILE_SIZE)) {
-                    break;
-                }
-
                 /* 맵 직접 배치 아이템 수집 */
                 collected = intersects_collectible(&level, &player);
                 if (collected == 'C') {
@@ -419,7 +412,6 @@ int main(int argc, char *argv[])
                     if (player.coins >= COINS_PER_1UP) {
                         player.coins -= COINS_PER_1UP;
                         player.lives++;
-                        LOG("[A] 100coin 1UP lives=%d", player.lives);
                         if (settings.soundOn) sfx_play(SFX_1UP);
                         if (settings.devMode)
                             dev_log_push(&devLog, "100coins -> 1UP! lives=%d", player.lives);
@@ -431,7 +423,6 @@ int main(int argc, char *argv[])
                         dev_log_push(&devLog, "mushroom collected!");
                 } else if (collected == '1') {
                     player.lives++;
-                    LOG("[B] tile 1UP lives=%d pos=(%.0f,%.0f)", player.lives, player.x, player.y);
                     if (settings.soundOn) sfx_play(SFX_1UP);
                     if (settings.devMode)
                         dev_log_push(&devLog, "1UP! lives=%d", player.lives);
@@ -444,7 +435,6 @@ int main(int argc, char *argv[])
                     if (settings.soundOn) sfx_play(SFX_POWERUP);
                 } else if (spawnedType == '1') {
                     player.lives++;
-                    LOG("[C] spawned 1UP lives=%d pos=(%.0f,%.0f)", player.lives, player.x, player.y);
                     if (settings.soundOn) sfx_play(SFX_1UP);
                 }
 
@@ -489,7 +479,6 @@ int main(int argc, char *argv[])
                 move_player_y(&level, &player);
 
                 if (hurtTimer == 0) {
-                    LOG("[E] hurt death before-- lives=%d", player.lives);
                     if (!settings.devMode) {
                         player.lives--;
                     }
