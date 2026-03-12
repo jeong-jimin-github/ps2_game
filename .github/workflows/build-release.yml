@@ -45,13 +45,11 @@ jobs:
             [ -f "$f" ] && zip game_engine_${{ steps.vars.outputs.sha_short }}.zip "$f"
           done
 
-      - name: Create/Update Release
+      - name: Create Release
         uses: ncipollo/release-action@v1
         with:
-          tag: latest
-          name: "Latest Build"
-          allowUpdates: true
-          replacesArtifacts: true
+          tag: build-${{ steps.vars.outputs.sha_short }}
+          name: "Build ${{ steps.vars.outputs.sha_short }}"
           makeLatest: true
           prerelease: false
           body: |
