@@ -244,26 +244,52 @@ static int aabb_overlap(float ax, float ay, float aw, float ah,
 }
 
 /* ── 이동 플랫폼 탑승 ───────────────────────────── */
-int check_on_moving_platform(const GameWorld *world, Player *p)
+int check_on_moving_platform(const GameWorld *world, Player *p, int applyCarry)
 {
     int i;
     float footY = p->y + PLAYER_H;
 
     for (i = 0; i < world->movingEntCount; i++) {
         const MovingEntity *ent = &world->movingEnts[i];
-        float dx, dy;
+        float dx;
+        float minX;
+        float maxX;
+        float minTop;
+        float maxTop;
+        float leftBound;
+        float rightBound;
+        float topMin;
+        float topMax;
         if (!ent->active || ent->isTrap) continue;
 
-        if (p->x + PLAYER_W > ent->x && p->x < ent->x + ent->width) {
-            if (footY >= ent->y && footY <= ent->y + 6.0f && p->vy >= 0.0f) {
+        dx = ent->x - ent->prevX;
+        minX = (ent->x < ent->prevX) ? ent->x : ent->prevX;
+        maxX = (ent->x > ent->prevX) ? ent->x : ent->prevX;
+        minTop = (ent->y < ent->prevY) ? ent->y : ent->prevY;
+        maxTop = (ent->y > ent->prevY) ? ent->y : ent->prevY;
+
+        if (applyCarry) {
+            /* 이미 탑승 중인 프레임은 현재 플랫폼 상단 기준으로 엄격히 판정합니다. */
+            leftBound = ent->x - 2.0f;
+            rightBound = ent->x + ent->width + 2.0f;
+            topMin = ent->y - 3.0f;
+            topMax = ent->y + 6.0f;
+        } else {
+            /* 착지 판정은 한 프레임 이동 스윕 범위를 사용합니다. */
+            leftBound = minX - 2.0f;
+            rightBound = maxX + ent->width + 2.0f;
+            topMin = minTop - 2.0f;
+            topMax = maxTop + 6.0f;
+        }
+
+        if (p->x + PLAYER_W >= leftBound && p->x <= rightBound) {
+            if (footY >= topMin && footY <= topMax && p->vy >= 0.0f) {
+                if (applyCarry) {
+                    p->x += dx;
+                }
                 p->y = ent->y - PLAYER_H;
                 p->vy = 0.0f;
                 p->onGround = 1;
-
-                dx = ent->x - ent->prevX;
-                dy = ent->y - ent->prevY;
-                p->x += dx;
-                p->y += dy;
                 return 1;
             }
         }

@@ -7,6 +7,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
+#include <malloc.h>
 #include <sifrpc.h>
 #include <loadfile.h>
 #include <kernel.h>
@@ -139,9 +141,6 @@ FILE *open_binary_file(const char *path)
     for (attempt = 0; attempt < 15; attempt++) {
         if (attempt > 0) {
             FlushCache(0);
-            iop_delay();
-            iop_delay();
-            if (attempt >= 5) iop_delay(); /* 5회 이상 실패 시 더 긴 대기 */
         }
 
         if (strchr(path, ':') == NULL) {
@@ -185,9 +184,6 @@ FILE *open_level_file(const char *path)
     for (attempt = 0; attempt < 15; attempt++) {
         if (attempt > 0) {
             FlushCache(0);
-            iop_delay();
-            iop_delay();
-            if (attempt >= 5) iop_delay();
         }
 
         if (strchr(path, ':') == NULL) {
@@ -233,4 +229,65 @@ void trim_line(char *s)
         s[len - 1] = '\0';
         len--;
     }
+}
+
+static void read_rom_version(char *out, size_t outSize)
+{
+    FILE *fp;
+    char buf[32];
+    size_t n;
+    size_t i;
+    size_t w;
+
+    if (outSize == 0) return;
+    out[0] = '\0';
+
+    fp = fopen("rom0:ROMVER", "rb");
+    if (fp == NULL) {
+        snprintf(out, outSize, "unknown");
+        return;
+    }
+
+    memset(buf, 0, sizeof(buf));
+    n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+
+    w = 0;
+    for (i = 0; i < n && w < outSize - 1; i++) {
+        unsigned char c = (unsigned char)buf[i];
+        if (c == '\0' || c == '\n' || c == '\r') break;
+        if (isprint(c)) {
+            out[w++] = (char)c;
+        }
+    }
+    out[w] = '\0';
+
+    if (w == 0) {
+        snprintf(out, outSize, "unknown");
+    }
+}
+
+void update_dev_hud_memory(DevHudInfo *info)
+{
+    struct mallinfo mi;
+
+    if (info == NULL) return;
+
+    info->totalMemBytes = GetMemorySize();
+
+    mi = mallinfo();
+    info->heapTotalBytes = mi.arena;
+    info->heapUsedBytes = mi.uordblks;
+    info->heapFreeBytes = mi.fordblks;
+    info->maxFreeBlockBytes = mi.keepcost;
+}
+
+void init_dev_hud_info(DevHudInfo *info)
+{
+    if (info == NULL) return;
+
+    memset(info, 0, sizeof(*info));
+    snprintf(info->systemName, sizeof(info->systemName), "PlayStation 2");
+    read_rom_version(info->romVersion, sizeof(info->romVersion));
+    update_dev_hud_memory(info);
 }

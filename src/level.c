@@ -67,8 +67,14 @@ int parse_level_file(const char *path, Level *level)
             break;
         }
 
-        strncpy(level->tiles[row], line, MAX_LEVEL_WIDTH);
-        level->tiles[row][MAX_LEVEL_WIDTH] = '\0';
+        {
+            size_t copy_len = strlen(line);
+            if (copy_len > MAX_LEVEL_WIDTH) {
+                copy_len = MAX_LEVEL_WIDTH;
+            }
+            memcpy(level->tiles[row], line, copy_len);
+            level->tiles[row][copy_len] = '\0';
+        }
 
         if ((int)strlen(level->tiles[row]) > level->width) {
             level->width = (int)strlen(level->tiles[row]);
@@ -113,8 +119,14 @@ int load_level_list(const char *path, LevelList *list)
         if (line[0] == '\0' || line[0] == ';') {
             continue;
         }
-        strncpy(list->paths[list->count], line, MAX_PATH_LEN - 1);
-        list->paths[list->count][MAX_PATH_LEN - 1] = '\0';
+        {
+            size_t copy_len = strlen(line);
+            if (copy_len > (size_t)(MAX_PATH_LEN - 1)) {
+                copy_len = (size_t)(MAX_PATH_LEN - 1);
+            }
+            memcpy(list->paths[list->count], line, copy_len);
+            list->paths[list->count][copy_len] = '\0';
+        }
         list->count++;
     }
 

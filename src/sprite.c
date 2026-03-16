@@ -78,7 +78,6 @@ int read_sprite_data(const char *path, SpriteData *sd)
     sd->valid = 1;
 
     FlushCache(0);
-    iop_delay();
 
     LOG("sprite read: %s (%ux%u)", path, (unsigned)header.width, (unsigned)header.height);
     return 1;

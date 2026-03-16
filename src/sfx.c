@@ -89,18 +89,15 @@ int sfx_init(void)
 
 void sfx_play(SfxId id)
 {
-    int ch;
     if (!sfx_ready || id < 0 || id >= SFX_COUNT || !sfx_loaded[id]) return;
 
-    ch = audsrv_ch_play_adpcm(-1, &sfx_samples[id]);
-    if (ch >= 0) {
-        audsrv_adpcm_set_volume_and_pan(ch, sfx_volume, 0);
-    }
+    audsrv_ch_play_adpcm(-1, &sfx_samples[id]);
 }
 
 void sfx_set_volume(int vol)
 {
     sfx_volume = vol;
+    audsrv_set_volume(sfx_volume);
 }
 
 void sfx_shutdown(void)
@@ -108,9 +105,10 @@ void sfx_shutdown(void)
     int i;
     for (i = 0; i < SFX_COUNT; i++) {
         if (sfx_loaded[i]) {
-            audsrv_free_adpcm(&sfx_samples[i]);
             sfx_loaded[i] = 0;
         }
     }
+    /* 개별 해제 API가 없는 SDK를 위해 ADPCM 유닛 재초기화로 정리합니다. */
+    audsrv_adpcm_init();
     sfx_ready = 0;
 }

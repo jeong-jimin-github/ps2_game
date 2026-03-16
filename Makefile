@@ -19,6 +19,9 @@ PYTHON ?= python3
 # Prefer explicit tool prefix so gcc/as/ld are resolved without relying on PATH shape.
 ifeq ($(OS),Windows_NT)
 EE_TOOL_PREFIX ?= $(PS2DEV)/ee/bin/mips64r5900el-ps2-elf-
+ISO_SCRIPT ?= cmd /c tools\make_iso.bat
+else
+ISO_SCRIPT ?= bash tools/make_iso.sh
 endif
 
 # 1. gsKit이 설치된 경로를 변수로 지정 (MSYS2 방식 경로)
@@ -40,7 +43,7 @@ EE_LIBS = -lgskit -ldmakit -lpad -laudsrv -lpatches -lc -ldebug
 all: $(EE_BIN)
 
 iso: $(EE_BIN)
-	bash tools/make_iso.sh
+	$(ISO_SCRIPT)
 
 $(EE_OBJS): assets
 

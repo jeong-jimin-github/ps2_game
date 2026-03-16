@@ -32,7 +32,7 @@ int check_head_bump_coin_block(Level *level, const Player *p, int *outTx, int *o
 void update_moving_entities(GameWorld *world);
 
 /** 이동 플랫폼 위 탑승 검사 + 플레이어 이동 */
-int check_on_moving_platform(const GameWorld *world, Player *p);
+int check_on_moving_platform(const GameWorld *world, Player *p, int applyCarry);
 
 /** 이동 함정과 교차 여부 */
 int intersects_moving_trap(const GameWorld *world, const Player *p);

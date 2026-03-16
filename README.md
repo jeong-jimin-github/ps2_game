@@ -11,11 +11,6 @@ bash build.sh clean    # 클린
 bash build.sh rebuild  # 클린 + 전체 재빌드
 ```
 
-생성 결과:
-
-- ELF: `game_engine.elf`
-- ISO: `SLUS_209.99.PS2_PLATFORMER.iso` (`tools/make_iso.sh` 기본값)
-
 ## 조작법
 
 - `D-Pad`: 이동

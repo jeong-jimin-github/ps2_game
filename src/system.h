@@ -32,4 +32,10 @@ FILE *open_level_file(const char *path);
 /** 문자열 끝의 공백/줄바꿈 제거 */
 void trim_line(char *s);
 
+/** 개발자 HUD용 본체/ROM 정보를 초기 조회 */
+void init_dev_hud_info(DevHudInfo *info);
+
+/** 개발자 HUD용 메모리 통계를 갱신 */
+void update_dev_hud_memory(DevHudInfo *info);
+
 #endif /* SYSTEM_H */

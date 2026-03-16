@@ -72,6 +72,17 @@ typedef struct {
     int count;
 } DevLog;
 
+/* ── 개발자 HUD 시스템 정보 ─────────────────────── */
+typedef struct {
+    char systemName[32];
+    char romVersion[32];
+    int totalMemBytes;
+    int heapTotalBytes;
+    int heapUsedBytes;
+    int heapFreeBytes;
+    int maxFreeBlockBytes;
+} DevHudInfo;
+
 /* ── 아이템 / 엔티티 ────────────────────────────── */
 #define MAX_MOVING_ENTITIES 32
 #define MAX_SPAWNED_ITEMS 32

@@ -38,6 +38,9 @@ void render_settings_menu(GSGLOBAL *gsGlobal, const GameTextures *textures,
 /** 개발자 HUD 로그 렌더링 */
 void render_dev_log(GSGLOBAL *gsGlobal, const BitmapFont *font, const DevLog *log);
 
+/** 개발자 HUD 시스템/메모리 정보 렌더링 */
+void render_dev_system_hud(GSGLOBAL *gsGlobal, const BitmapFont *font, const DevHudInfo *info);
+
 /** 로딩 화면 (메뉴 배경 + "Loading..." 텍스트) */
 void render_loading_screen(GSGLOBAL *gsGlobal, const GameTextures *textures, const BitmapFont *font);
 

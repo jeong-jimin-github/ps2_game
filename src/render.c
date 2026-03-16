@@ -611,6 +611,62 @@ void render_dev_log(GSGLOBAL *gsGlobal, const BitmapFont *font, const DevLog *dl
     }
 }
 
+void render_dev_system_hud(GSGLOBAL *gsGlobal, const BitmapFont *font, const DevHudInfo *info)
+{
+    float w = 360.0f;
+    float x = (float)SCREEN_W - w - 8.0f;
+    float y = 8.0f;
+    float h = 108.0f;
+    int totalKb;
+    int heapTotalKb;
+    int heapUsedKb;
+    int heapFreeKb;
+    int maxKb;
+    u64 bg;
+    u64 border;
+    u64 title;
+    u64 text;
+    u64 value;
+    char buf[64];
+
+    if (!font || !font->texValid || !info) return;
+
+    totalKb = info->totalMemBytes > 0 ? (info->totalMemBytes / 1024) : 0;
+    heapTotalKb = info->heapTotalBytes > 0 ? (info->heapTotalBytes / 1024) : 0;
+    heapUsedKb = info->heapUsedBytes > 0 ? (info->heapUsedBytes / 1024) : 0;
+    heapFreeKb = info->heapFreeBytes > 0 ? (info->heapFreeBytes / 1024) : 0;
+    maxKb = info->maxFreeBlockBytes > 0 ? (info->maxFreeBlockBytes / 1024) : 0;
+
+    bg = GS_SETREG_RGBAQ(0x00, 0x00, 0x00, 0x48, 0x00);
+    border = GS_SETREG_RGBAQ(0x30, 0x80, 0xC0, 0x80, 0x00);
+    title = GS_SETREG_RGBAQ(0x60, 0xD0, 0xFF, 0x80, 0x00);
+    text = GS_SETREG_RGBAQ(0xC0, 0xC0, 0xC0, 0x80, 0x00);
+    value = GS_SETREG_RGBAQ(0x80, 0xFF, 0x80, 0x80, 0x00);
+
+    gsKit_prim_sprite(gsGlobal, x, y, x + w, y + h, 4, bg);
+    gsKit_prim_sprite(gsGlobal, x, y, x + w, y + 2.0f, 5, border);
+    gsKit_prim_sprite(gsGlobal, x, y + h - 2.0f, x + w, y + h, 5, border);
+    gsKit_prim_sprite(gsGlobal, x, y, x + 2.0f, y + h, 5, border);
+    gsKit_prim_sprite(gsGlobal, x + w - 2.0f, y, x + w, y + h, 5, border);
+
+    font_draw_string(gsGlobal, font, x + 10.0f, y + 6.0f, 5, title, "DEV SYSTEM");
+
+    snprintf(buf, sizeof(buf), "Console: %s", info->systemName[0] ? info->systemName : "unknown");
+    font_draw_string(gsGlobal, font, x + 10.0f, y + 24.0f, 5, text, buf);
+
+    snprintf(buf, sizeof(buf), "ROMVER: %s", info->romVersion[0] ? info->romVersion : "unknown");
+    font_draw_string(gsGlobal, font, x + 10.0f, y + 40.0f, 5, text, buf);
+
+    snprintf(buf, sizeof(buf), "EE RAM Total: %d KB", totalKb);
+    font_draw_string(gsGlobal, font, x + 10.0f, y + 56.0f, 5, value, buf);
+
+    snprintf(buf, sizeof(buf), "Current Used/Total: %d/%d KB", heapUsedKb, heapTotalKb);
+    font_draw_string(gsGlobal, font, x + 10.0f, y + 72.0f, 5, value, buf);
+
+    snprintf(buf, sizeof(buf), "Heap Free/MaxBlk: %d/%d KB", heapFreeKb, maxKb);
+    font_draw_string(gsGlobal, font, x + 10.0f, y + 88.0f, 5, value, buf);
+}
+
 void render_text(GSGLOBAL *gsGlobal, const BitmapFont *font, float x, float y, const char *text, u64 color)
 {
     if (font && font->texValid) {

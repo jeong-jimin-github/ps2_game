@@ -32,17 +32,8 @@ void load_all_assets_from_cd(AssetBank *bank)
     init_scr();
     scr_printf("=== PS2 Game by Jeong Jimin - Loading ===\n\n");
 
-    /* 실제 CD에서 CDVDFSV가 디스크를 인식할 시간 확보 (노후 드라이브 대응) */
-    scr_printf("Waiting for CD drive");
+    /* 고정 대기 없이 즉시 로딩 시작 */
     FlushCache(0);
-    {
-        int w;
-        for (w = 0; w < 10; w++) {
-            iop_delay();
-            scr_printf(".");
-        }
-    }
-    scr_printf(" OK\n\n");
 
     scr_printf("Opening SPRITES.PAK ...\n");
 
@@ -54,10 +45,6 @@ void load_all_assets_from_cd(AssetBank *bank)
             if (pakAttempt > 0) {
                 scr_printf("  Retry %d/3 ...\n", pakAttempt + 1);
                 FlushCache(0);
-                {
-                    int rw;
-                    for (rw = 0; rw < 5; rw++) iop_delay();
-                }
             }
             if (load_spritepack("sprites.pak", &pack)) {
                 pakOk = 1;

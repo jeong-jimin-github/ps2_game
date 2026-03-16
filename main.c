@@ -32,6 +32,9 @@
 #include "src/font.h"
 #include "src/sfx.h"
 
+/* 일부 ps2sdk 헤더 조합에서 선언이 누락되어 명시 선언을 둡니다. */
+void sceSifInitRpc(int mode);
+
 /* ── 개발자 로그 헬퍼 ────────────────────────────── */
 static void dev_log_push(DevLog *dl, const char *fmt, ...)
 {
@@ -84,7 +87,7 @@ int main(int argc, char *argv[])
     GameTextures textures;
     AnimationClip playerAnims[PLAYER_ANIM_COUNT];
     PlayerAnimator animator;
-    BgmPlayer bgm;
+    BgmStream bgm;
     BitmapFont uiFont;
     int padModulesOk = 0;
     int audioModulesOk = 0;
@@ -93,6 +96,7 @@ int main(int argc, char *argv[])
     GameScene scene = SCENE_MENU;
     GameSettings settings;
     DevLog devLog;
+    DevHudInfo devHudInfo;
     int menuSel = 0;         /* 메인 메뉴 커서 */
     int settingsSel = 0;     /* 설정 메뉴 커서 */
 
@@ -105,6 +109,7 @@ int main(int argc, char *argv[])
     memset(&uiFont, 0, sizeof(uiFont));
     memset(&bgm, 0, sizeof(bgm));
     memset(&devLog, 0, sizeof(devLog));
+    memset(&devHudInfo, 0, sizeof(devHudInfo));
     (void)argc; (void)argv;
     settings.soundOn = 1;
     settings.devMode = 0;
@@ -117,6 +122,7 @@ int main(int argc, char *argv[])
     sbv_patch_disable_prefix_check();
 
     load_all_iop_modules(&padModulesOk, &audioModulesOk);
+    init_dev_hud_info(&devHudInfo);
 
     if (padModulesOk) {
         if (padInit(0) != 0) {
@@ -191,9 +197,11 @@ int main(int argc, char *argv[])
         LOG("fallback to debug rectangle player (missing assets/player.ps2tex)");
     }
 
-    /* ── BGM 초기화 (RAM 기반, 하나만 로드 → 씬 전환 시 교체) ── */
-    if (!init_bgm_player(&bgm, MENU_BGM_FILE_PATH, audioModulesOk)) {
+    /* ── BGM 초기화 (CD 스트리밍 기반) ── */
+    if (!bgms_open(&bgm, MENU_BGM_FILE_PATH, audioModulesOk)) {
         LOG("Menu BGM disabled (put a PCM WAV at %s)", MENU_BGM_FILE_PATH);
+    } else {
+        bgms_play(&bgm);
     }
     if (!settings.soundOn) bgm_set_volume(0);
 
@@ -205,8 +213,8 @@ int main(int argc, char *argv[])
 
     /* ── 게임 루프 ── */
     while (1) {
-        /* BGM 스트리밍 (RAM → audsrv) */
-        update_bgm_stream(&bgm);
+        /* BGM 스트리밍 (CD → audsrv) */
+        bgms_update(&bgm);
 
         /* 패드 입력 */
         if (padReady) {
@@ -245,7 +253,13 @@ int main(int argc, char *argv[])
                     scene = SCENE_PLAY;
                     /* BGM 전환: 메뉴→플레이 (로딩 화면 표시) */
                     render_loading_screen(gsGlobal, &textures, &uiFont);
-                    bgm_swap(&bgm, BGM_FILE_PATH);
+                    bgms_stop(&bgm);
+                    bgms_close(&bgm);
+                    if (bgms_open(&bgm, BGM_FILE_PATH, audioModulesOk)) {
+                        bgms_play(&bgm);
+                    } else {
+                        LOG("Play BGM open failed: %s", BGM_FILE_PATH);
+                    }
                     if (!settings.soundOn) bgm_set_volume(0);
                     /* 레벨 로드 */
                     load_current_level(&levelList, &level, &world, &player,
@@ -298,6 +312,10 @@ int main(int argc, char *argv[])
          * SCENE_PLAY
          * ───────────────────────────────────────────*/
         case SCENE_PLAY:
+            /* 이동 엔티티를 먼저 갱신해 같은 프레임 이동량으로 지면 판정을 수행합니다. */
+            update_moving_entities(&world);
+            update_spawned_items(&world);
+
             /* 게임 로직 */
             if (!gameOver && clearTimer == 0 && hurtTimer == 0) {
                 char collected;
@@ -327,7 +345,7 @@ int main(int argc, char *argv[])
 
                 player.onGround = check_grounded(&level, &player);
                 if (!player.onGround) {
-                    player.onGround = check_on_moving_platform(&world, &player);
+                    player.onGround = check_on_moving_platform(&world, &player, 1);
                 }
                 if (player.onGround) {
                     player.coyoteTimer = COYOTE_FRAMES;
@@ -374,7 +392,7 @@ int main(int argc, char *argv[])
                 if (!player.onGround) {
                     player.onGround = check_grounded(&level, &player);
                     if (!player.onGround) {
-                        player.onGround = check_on_moving_platform(&world, &player);
+                        player.onGround = check_on_moving_platform(&world, &player, 0);
                     }
                 }
 
@@ -504,6 +522,7 @@ int main(int argc, char *argv[])
             } else {
                 /* gameOver 상태 */
                 if ((padData & PAD_START) && !(prevPadData & PAD_START)) {
+                    levelList.current = 0;
                     load_current_level(&levelList, &level, &world, &player,
                                        &gameOver, &hurtTimer, &clearTimer);
                 }
@@ -530,14 +549,16 @@ int main(int argc, char *argv[])
                 scene = SCENE_MENU;
                 /* BGM 전환: 플레이→메뉴 (로딩 화면 표시) */
                 render_loading_screen(gsGlobal, &textures, &uiFont);
-                bgm_swap(&bgm, MENU_BGM_FILE_PATH);
+                bgms_stop(&bgm);
+                bgms_close(&bgm);
+                if (bgms_open(&bgm, MENU_BGM_FILE_PATH, audioModulesOk)) {
+                    bgms_play(&bgm);
+                } else {
+                    LOG("Menu BGM open failed: %s", MENU_BGM_FILE_PATH);
+                }
                 if (!settings.soundOn) bgm_set_volume(0);
                 break;
             }
-
-            /* 이동 엔티티 + 스폰 아이템 업데이트 */
-            update_moving_entities(&world);
-            update_spawned_items(&world);
 
             /* 애니메이션 + 카메라 */
             animator_step(&animator, playerAnims, &player, padData, gameOver, hurtTimer, clearTimer);
@@ -554,6 +575,11 @@ int main(int argc, char *argv[])
             if ((frameCount % 300) == 0) {
                 LOG("frame=%u level=%d pos=(%.1f, %.1f) camX=%.1f", frameCount, levelList.current, player.x, player.y, cameraX);
             }
+
+            /* 개발자 HUD 메모리 값은 매 프레임이 아닌 주기 갱신으로 오버헤드를 줄입니다. */
+            if (settings.devMode && ((frameCount % 30) == 0)) {
+                update_dev_hud_memory(&devHudInfo);
+            }
             frameCount++;
 
             /* 렌더링 */
@@ -568,7 +594,6 @@ int main(int argc, char *argv[])
             if (gameOver) {
                 gsKit_prim_sprite(gsGlobal, 0.0f, 0.0f, (float)SCREEN_W, (float)SCREEN_H, 3,
                                   GS_SETREG_RGBAQ(0x80, 0x00, 0x00, 0x40, 0x00));
-                char buf[32];
                 render_text(gsGlobal, &uiFont, (SCREEN_W / 2) - 64, (SCREEN_H / 2) - 8, "GAME OVER",
                              GS_SETREG_RGBAQ(0xFF, 0xFF, 0xFF, 0x80, 0x00));
                 render_text(gsGlobal, &uiFont, (SCREEN_W / 2) - 96, (SCREEN_H / 2) + 16, "Press START to retry",
@@ -576,6 +601,7 @@ int main(int argc, char *argv[])
             }
 
             if (settings.devMode) {
+                render_dev_system_hud(gsGlobal, &uiFont, &devHudInfo);
                 render_dev_log(gsGlobal, &uiFont, &devLog);
             }
             break;
@@ -589,7 +615,7 @@ int main(int argc, char *argv[])
     }
 
     sfx_shutdown();
-    shutdown_bgm_player(&bgm);
+    bgms_close(&bgm);
 
     return 0;
 }
